@@ -10,6 +10,8 @@ COPY . .
 # Instala as dependências
 RUN pip install --upgrade pip
 RUN pip install -r requirements.txt
+RUN pip install "python-telegram-bot[job-queue]"
+
 
 # Define o ponto de entrada
 CMD ["python", "bot.py"]

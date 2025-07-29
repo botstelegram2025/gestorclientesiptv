@@ -2,7 +2,9 @@ import os
 import csv
 import sqlite3
 from datetime import datetime, timedelta
-from telegram import (Update, InlineKeyboardButton, InlineKeyboardMarkup)
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
+)
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler,
     filters, ConversationHandler, CallbackQueryHandler
@@ -55,19 +57,22 @@ def get_duracao_meses(pacote):
     return mapa.get(pacote.lower(), 1)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [[
+        KeyboardButton("/addcliente"),
+        KeyboardButton("/listclientes")
+    ], [
+        KeyboardButton("/renovarcliente"),
+        KeyboardButton("/relatorio")
+    ]]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text(
         "Bem-vindo ao Bot de Gestão de Clientes!\n"
-        "Comandos:\n"
-        "/addcliente - adicionar cliente\n"
-        "/listclientes - listar clientes\n"
-        "/enviamsg - enviar mensagem padrão\n"
-        "/renovarcliente - renovar plano\n"
-        "/exportar - exportar clientes\n"
-        "/relatorio - log de renovações"
+        "Escolha uma opção no menu abaixo ou digite um comando.",
+        reply_markup=reply_markup
     )
 
 async def add_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Digite o nome do cliente:")
+    await update.message.reply_text("Digite o nome do cliente:", reply_markup=ReplyKeyboardRemove())
     return ADD_NAME
 
 async def add_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -77,8 +82,8 @@ async def add_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def add_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['telefone'] = update.message.text
-    pacotes_str = "\n".join(PACOTES)
-    await update.message.reply_text(f"Escolha o pacote do cliente (duração):\n{pacotes_str}")
+    buttons = [[KeyboardButton(p)] for p in PACOTES]
+    await update.message.reply_text("Escolha o pacote do cliente (duração):", reply_markup=ReplyKeyboardMarkup(buttons, one_time_keyboard=True, resize_keyboard=True))
     return ADD_PACOTE
 
 async def add_pacote(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -87,8 +92,8 @@ async def add_pacote(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Pacote inválido. Tente novamente.")
         return ADD_PACOTE
     context.user_data['pacote'] = pacote
-    planos_str = ", ".join(str(p) for p in PLANOS)
-    await update.message.reply_text(f"Escolha o valor do plano: {planos_str}")
+    buttons = [[KeyboardButton(str(p))] for p in PLANOS]
+    await update.message.reply_text("Escolha o valor do plano:", reply_markup=ReplyKeyboardMarkup(buttons, one_time_keyboard=True, resize_keyboard=True))
     return ADD_PLANO
 
 async def add_plano(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -113,7 +118,7 @@ async def add_plano(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-    await update.message.reply_text(f"✅ Cliente {nome} cadastrado até {vencimento}.")
+    await update.message.reply_text(f"✅ Cliente {nome} cadastrado até {vencimento}.", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
 async def list_clientes(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -211,7 +216,7 @@ async def relatorio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg or "Nenhuma renovação registrada.")
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Operação cancelada.")
+    await update.message.reply_text("Operação cancelada.", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
 def main():

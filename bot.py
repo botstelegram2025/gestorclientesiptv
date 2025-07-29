@@ -3,8 +3,7 @@ import csv
 import sqlite3
 from datetime import datetime, timedelta
 from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    ReplyKeyboardMarkup, KeyboardButton
+    Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 )
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler,
@@ -26,6 +25,14 @@ mensagens_padrao = {
     "promo": "Olá {nome}, confira nossa promoção especial!",
     "lembrete": "Olá {nome}, só passando para lembrar do seu compromisso amanhã.",
 }
+
+def teclado_principal():
+    teclado = [
+        ["➕ Adicionar Cliente", "📋 Listar Clientes"],
+        ["🔄 Renovar Plano", "📊 Relatório"],
+        ["📤 Exportar Dados", "❌ Cancelar Operação"]
+    ]
+    return ReplyKeyboardMarkup(teclado, resize_keyboard=True)
 
 def criar_tabela():
     conn = sqlite3.connect(DB_PATH)
@@ -57,23 +64,15 @@ def get_duracao_meses(pacote):
     mapa = {"1 mês": 1, "3 meses": 3, "6 meses": 6, "1 ano": 12}
     return mapa.get(pacote.lower(), 1)
 
-def teclado_principal():
-    teclado = [
-        [KeyboardButton("➕ Adicionar Cliente"), KeyboardButton("📋 Listar Clientes")],
-        [KeyboardButton("🔄 Renovar Plano"), KeyboardButton("📤 Exportar Dados")],
-        [KeyboardButton("📊 Relatório"), KeyboardButton("❌ Cancelar Operação")]
-    ]
-    return ReplyKeyboardMarkup(teclado, resize_keyboard=True, persistent=True)
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Bem-vindo ao Bot de Gestão de Clientes!\n"
-        "Use os botões abaixo para navegar pelas opções.",
+        "👋 Bem-vindo ao Bot de Gestão de Clientes!\n\n"
+        "Escolha uma opção no menu abaixo ou digite um comando.",
         reply_markup=teclado_principal()
     )
 
 async def add_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Digite o nome do cliente:")
+    await update.message.reply_text("Digite o nome do cliente:", reply_markup=ReplyKeyboardRemove())
     return ADD_NAME
 
 async def add_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -83,8 +82,8 @@ async def add_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def add_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['telefone'] = update.message.text
-    pacotes_str = "\n".join(PACOTES)
-    await update.message.reply_text(f"Escolha o pacote do cliente (duração):\n{pacotes_str}")
+    buttons = [[KeyboardButton(p)] for p in PACOTES]
+    await update.message.reply_text("Escolha o pacote do cliente (duração):", reply_markup=ReplyKeyboardMarkup(buttons, one_time_keyboard=True, resize_keyboard=True))
     return ADD_PACOTE
 
 async def add_pacote(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -93,8 +92,8 @@ async def add_pacote(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Pacote inválido. Tente novamente.")
         return ADD_PACOTE
     context.user_data['pacote'] = pacote
-    planos_str = ", ".join(str(p) for p in PLANOS)
-    await update.message.reply_text(f"Escolha o valor do plano: {planos_str}")
+    buttons = [[KeyboardButton(str(p))] for p in PLANOS]
+    await update.message.reply_text("Escolha o valor do plano:", reply_markup=ReplyKeyboardMarkup(buttons, one_time_keyboard=True, resize_keyboard=True))
     return ADD_PLANO
 
 async def add_plano(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -119,7 +118,10 @@ async def add_plano(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-    await update.message.reply_text(f"✅ Cliente {nome} cadastrado até {vencimento}.", reply_markup=teclado_principal())
+    await update.message.reply_text(
+        f"✅ Cliente {nome} cadastrado até {vencimento}.",
+        reply_markup=teclado_principal()
+    )
     return ConversationHandler.END
 
 async def list_clientes(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -130,13 +132,13 @@ async def list_clientes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     if not lista:
-        await update.message.reply_text("Nenhum cliente cadastrado.", reply_markup=teclado_principal())
+        await update.message.reply_text("Nenhum cliente cadastrado.")
         return
 
     msg = "Clientes cadastrados:\n"
     for nome, telefone, pacote, plano, venc in lista:
         msg += f"- {nome} ({telefone}): R${plano} ({pacote}) até {venc}\n"
-    await update.message.reply_text(msg, reply_markup=teclado_principal())
+    await update.message.reply_text(msg)
 
 async def renovar_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect(DB_PATH)
@@ -144,10 +146,6 @@ async def renovar_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cursor.execute("SELECT nome, telefone, vencimento FROM clientes")
     lista = cursor.fetchall()
     conn.close()
-
-    if not lista:
-        await update.message.reply_text("Nenhum cliente para renovar.", reply_markup=teclado_principal())
-        return
 
     keyboard = [
         [
@@ -160,7 +158,7 @@ async def renovar_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ] for nome, telefone, vencimento in lista
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Selecione um cliente para renovar ou cancelar:", reply_markup=reply_markup)
+    await update.message.reply_text("Selecione um cliente:", reply_markup=reply_markup)
 
 async def callback_opcoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -221,27 +219,8 @@ async def relatorio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg or "Nenhuma renovação registrada.")
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Operação cancelada.", reply_markup=teclado_principal())
+    await update.message.reply_text("❌ Operação cancelada.", reply_markup=teclado_principal())
     return ConversationHandler.END
-
-# Handler para teclado persistente
-async def teclado_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    texto = update.message.text
-
-    if texto == "➕ Adicionar Cliente":
-        return await add_cliente(update, context)
-    elif texto == "📋 Listar Clientes":
-        return await list_clientes(update, context)
-    elif texto == "🔄 Renovar Plano":
-        return await renovar_cliente(update, context)
-    elif texto == "📤 Exportar Dados":
-        return await exportar(update, context)
-    elif texto == "📊 Relatório":
-        return await relatorio(update, context)
-    elif texto == "❌ Cancelar Operação":
-        return await cancel(update, context)
-    else:
-        await update.message.reply_text("Opção inválida. Use os botões do teclado.")
 
 def main():
     criar_tabela()
@@ -260,10 +239,14 @@ def main():
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(conv_add)
-    application.add_handler(CallbackQueryHandler(callback_opcoes))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, teclado_handler))
+    application.add_handler(CommandHandler("listclientes", list_clientes))
+    application.add_handler(CommandHandler("renovarcliente", renovar_cliente))
+    application.add_handler(CallbackQueryHandler(callback_opcoes, pattern="^(renovar|cancelar):"))
+    application.add_handler(CommandHandler("exportar", exportar))
+    application.add_handler(CommandHandler("relatorio", relatorio))
+    application.add_handler(CommandHandler("cancel", cancel))
 
     application.run_polling()
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

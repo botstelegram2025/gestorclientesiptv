@@ -1,5 +1,9 @@
+import os
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, ContextTypes,
+    ConversationHandler, MessageHandler, filters
+)
 
 # Estados para conversas
 ADD_NAME, ADD_PHONE, SEND_CLIENTE, SEND_MSG = range(4)
@@ -81,7 +85,12 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 def main():
-    application = ApplicationBuilder().token("SEU_TOKEN_AQUI").build()
+    token = os.getenv("BOT_TOKEN")
+    if not token:
+        print("❌ ERRO: Variável de ambiente BOT_TOKEN não definida!")
+        return
+
+    application = ApplicationBuilder().token(token).build()
 
     conv_add_cliente = ConversationHandler(
         entry_points=[CommandHandler('addcliente', add_cliente)],

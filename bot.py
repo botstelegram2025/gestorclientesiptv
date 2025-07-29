@@ -3,6 +3,8 @@ import re
 import sqlite3
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
+from urllib.parse import quote_plus
+
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton,
     ReplyKeyboardMarkup, ReplyKeyboardRemove
@@ -18,9 +20,17 @@ DB_PATH = "clientes.db"
 ADMIN_CHAT_ID = 123456789  # <<< SUBSTITUA PELO SEU CHAT_ID REAL
 
 ADD_NAME, ADD_PHONE, ADD_PACOTE, ADD_PLANO = range(4)
+ESCOLHER_MENSAGEM = 4
 
 PACOTES = ["1 mês", "3 meses", "6 meses", "1 ano"]
 PLANOS = [30, 35, 40, 45, 60, 65, 70, 90, 110, 135]
+
+mensagens_padrao = {
+    "promo": "📢 Olá {nome}, confira nossa promoção especial!",
+    "lembrete": "⏰ Olá {nome}, só passando para lembrar do seu compromisso amanhã.",
+    "vencimento_hoje": "⚠️ Olá {nome}, seu plano vence hoje!",
+    "vencido": "❌ Olá {nome}, seu plano está vencido desde ontem."
+}
 
 def teclado_principal():
     teclado = [
@@ -63,6 +73,13 @@ def telefone_valido(telefone):
 def get_duracao_meses(pacote):
     mapa = {"1 mês": 1, "3 meses": 3, "6 meses": 6, "1 ano": 12}
     return mapa.get(pacote, 1)
+
+def criar_botao_whatsapp(telefone: str, texto: str) -> InlineKeyboardMarkup:
+    # telefone deve estar no formato internacional, ex: 5511999998888 (55 + DDD + número)
+    texto_url = quote_plus(texto)
+    link = f"https://wa.me/{telefone}?text={texto_url}"
+    teclado = InlineKeyboardMarkup([[InlineKeyboardButton("Enviar WhatsApp", url=link)]])
+    return teclado
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -149,25 +166,40 @@ async def listar_clientes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Nenhum cliente cadastrado.", reply_markup=teclado_principal())
         return
 
-    buttons = []
     for nome, telefone, pacote, plano, vencimento in clientes:
-        label = f"{nome} - {telefone} - {pacote} até {vencimento}"
-        buttons.append([
-            InlineKeyboardButton(f"🔄 Renovar", callback_data=f"renovar:{telefone}"),
-            InlineKeyboardButton(f"❌ Cancelar", callback_data=f"cancelar:{telefone}")
-        ])
-        buttons.append([InlineKeyboardButton(label, callback_data="ignore")])
+        texto = (
+            f"👤 Nome: {nome}\n"
+            f"📞 Telefone: {telefone}\n"
+            f"📦 Pacote: {pacote}\n"
+            f"💰 Plano: R$ {plano}\n"
+            f"📅 Vencimento: {vencimento}"
+        )
+        # Cria botão WhatsApp para enviar mensagem genérica
+        texto_msg = f"Olá {nome}, seu plano vence em {vencimento}. Precisa de ajuda?"
+        teclado = criar_botao_whatsapp(f"55{telefone}", texto_msg)
+        await update.message.reply_text(texto, reply_markup=teclado)
 
-    markup = InlineKeyboardMarkup(buttons)
-    await update.message.reply_text("Lista de clientes:", reply_markup=markup)
+async def avisar_vencimento(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    hoje = datetime.now().date().strftime("%Y-%m-%d")
+    cursor.execute("SELECT nome, telefone, vencimento FROM clientes WHERE vencimento = ?", (hoje,))
+    clientes = cursor.fetchall()
+    conn.close()
+
+    if not clientes:
+        await update.message.reply_text("Nenhum cliente com vencimento hoje.", reply_markup=teclado_principal())
+        return
+
+    for nome, telefone, vencimento in clientes:
+        msg = f"⚠️ Olá {nome}, seu plano vence hoje ({vencimento})."
+        teclado = criar_botao_whatsapp(f"55{telefone}", msg)
+        await update.message.reply_text(msg, reply_markup=teclado)
 
 async def callback_opcoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
-
-    if data == "ignore":
-        return
 
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
@@ -205,36 +237,33 @@ async def callback_opcoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
         await query.edit_message_text("🗑️ Cliente removido.")
 
-async def cancelar_operacao(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Operação cancelada.", reply_markup=teclado_principal())
     return ConversationHandler.END
 
-async def mensagem_nao_reconhecida(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Comando não reconhecido. Use o menu abaixo.", reply_markup=teclado_principal())
-
 def main():
     criar_tabela()
-    application = ApplicationBuilder().token(TOKEN).build()
+    app = ApplicationBuilder().token(TOKEN).build()
 
     conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^➕ Adicionar Cliente$"), add_cliente)],
+        entry_points=[MessageHandler(filters.Regex("^(➕ Adicionar Cliente)$"), add_cliente)],
         states={
             ADD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_name)],
             ADD_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_phone)],
             ADD_PACOTE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_pacote)],
             ADD_PLANO: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_plano)],
         },
-        fallbacks=[CommandHandler('cancelar', cancelar_operacao), MessageHandler(filters.Regex("^❌ Cancelar Operação$"), cancelar_operacao)],
-        allow_reentry=True,
+        fallbacks=[CommandHandler("cancelar", cancelar)]
     )
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(conv_handler)
-    application.add_handler(MessageHandler(filters.Regex("^📋 Listar Clientes$"), listar_clientes))
-    application.add_handler(CallbackQueryHandler(callback_opcoes))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, mensagem_nao_reconhecida))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(conv_handler)
+    app.add_handler(MessageHandler(filters.Regex("^(📋 Listar Clientes)$"), listar_clientes))
+    # Você pode adicionar handlers para renovar, relatório, etc. aqui
+    # Exemplo: app.add_handler(MessageHandler(filters.Regex("^(🔄 Renovar Plano)$"), renovar_plano))
+    app.add_handler(CallbackQueryHandler(callback_opcoes))
 
-    application.run_polling()
+    app.run_polling()
 
 if __name__ == "__main__":
     main()

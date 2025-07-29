@@ -4,6 +4,7 @@ import re
 import sqlite3
 import tempfile
 from datetime import datetime, timedelta
+from functools import partial
 from apscheduler.schedulers.background import BackgroundScheduler
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton,
@@ -74,6 +75,10 @@ def get_duracao_meses(pacote):
     mapa = {"1 mês": 1, "3 meses": 3, "6 meses": 6, "1 ano": 12}
     return mapa.get(pacote, 1)
 
+def enviar_msg(bot, chat_id, nome, tipo_msg):
+    texto = mensagens_padrao[tipo_msg].format(nome=nome)
+    bot.send_message(chat_id=chat_id, text=texto)
+
 def agendar_lembretes(bot, nome, telefone, vencimento):
     datas = {
         -1: "vencido",
@@ -85,7 +90,7 @@ def agendar_lembretes(bot, nome, telefone, vencimento):
         quando = datetime.strptime(vencimento, "%Y-%m-%d") - timedelta(days=dias)
         if quando > datetime.now():
             scheduler.add_job(
-                lambda n=nome, t=telefone, k=tipo_msg: bot.send_message(chat_id=t, text=mensagens_padrao[k].format(nome=n)),
+                partial(enviar_msg, bot, telefone, nome, tipo_msg),
                 'date', run_date=quando
             )
 
@@ -187,14 +192,16 @@ async def renovar_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lista = cursor.fetchall()
     conn.close()
 
+    if not lista:
+        await update.message.reply_text("Nenhum cliente cadastrado para renovação.")
+        return
+
     keyboard = [
-        [
-            InlineKeyboardButton(f"🔁 {nome} - {vencimento}", callback_data=f"renovar:{telefone}"),
-            InlineKeyboardButton("🗑️ Cancelar", callback_data=f"cancelar:{telefone}")
-        ] for nome, telefone, vencimento in lista
+        [InlineKeyboardButton(f"🔁 {nome} - {datetime.strptime(vencimento, '%Y-%m-%d').strftime('%d/%m/%Y')}", callback_data=f"renovar:{telefone}")]
+        for nome, telefone, vencimento in lista
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("👥 Selecione um cliente:", reply_markup=reply_markup)
+    await update.message.reply_text("👥 Selecione um cliente para renovar:", reply_markup=reply_markup)
 
 async def callback_opcoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -241,14 +248,24 @@ async def exportar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rows = cursor.fetchall()
     conn.close()
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".csv", mode="w", newline="") as tmpfile:
-        writer = csv.writer(tmpfile)
-        writer.writerow(["ID", "Nome", "Telefone", "Pacote", "Plano", "Vencimento"])
-        writer.writerows(rows)
-        tmpfile_path = tmpfile.name
+    if not rows:
+        await update.message.reply_text("Nenhum dado para exportar.")
+        return
 
-    await update.message.reply_document(document=open(tmpfile_path, "rb"))
-    os.remove(tmpfile_path)
+    tmpfile_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".csv", mode="w", newline="", encoding='utf-8') as tmpfile:
+            writer = csv.writer(tmpfile)
+            writer.writerow(["ID", "Nome", "Telefone", "Pacote", "Plano", "Vencimento"])
+            writer.writerows(rows)
+            tmpfile_path = tmpfile.name
+
+        with open(tmpfile_path, "rb") as f:
+            await update.message.reply_document(document=f, filename="clientes.csv")
+
+    finally:
+        if tmpfile_path and os.path.exists(tmpfile_path):
+            os.remove(tmpfile_path)
 
 async def relatorio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -275,11 +292,10 @@ async def enviar_mensagem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ESCOLHER_MENSAGEM
 
 async def escolher_mensagem(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tipo = update.message.text.strip().replace("📨 ", "")
-    mensagem = mensagens_padrao.get(tipo)
-    if not mensagem:
-        await update.message.reply_text("❗ Tipo de mensagem inválido.")
-        return ESCOLHER_MENSAGEM
+    tipo_msg = update.message.text.replace("📨 ", "")
+    if tipo_msg not in mensagens_padrao:
+        await update.message.reply_text("Tipo de mensagem inválido.")
+        return ConversationHandler.END
 
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
@@ -287,62 +303,60 @@ async def escolher_mensagem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clientes = cursor.fetchall()
     conn.close()
 
+    if not clientes:
+        await update.message.reply_text("Nenhum cliente para enviar mensagem.")
+        return ConversationHandler.END
+
     for nome, telefone in clientes:
-        texto = mensagem.format(nome=nome)
+        texto = mensagens_padrao[tipo_msg].format(nome=nome)
         try:
             await context.bot.send_message(chat_id=telefone, text=texto)
         except Exception as e:
+            # Logar erro, ignorar para não interromper loop
             print(f"Erro ao enviar para {telefone}: {e}")
 
-    await update.message.reply_text("✅ Mensagens enviadas.")
+    await update.message.reply_text(f"Mensagens '{tipo_msg}' enviadas a todos os clientes.", reply_markup=teclado_principal())
     return ConversationHandler.END
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Operação cancelada.", reply_markup=teclado_principal())
+async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Operação cancelada.", reply_markup=teclado_principal())
     return ConversationHandler.END
 
 def main():
     criar_tabela()
-    application = ApplicationBuilder().token(TOKEN).build()
 
-    conv_add = ConversationHandler(
-        entry_points=[CommandHandler("addcliente", add_cliente)],
+    app = ApplicationBuilder().token(TOKEN).build()
+
+    conv_handler_add = ConversationHandler(
+        entry_points=[CommandHandler("add", add_cliente)],
         states={
             ADD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_name)],
             ADD_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_phone)],
             ADD_PACOTE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_pacote)],
             ADD_PLANO: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_plano)],
         },
-        fallbacks=[CommandHandler("cancel", cancel)]
+        fallbacks=[CommandHandler("cancel", cancelar)]
     )
 
-    conv_msg = ConversationHandler(
-        entry_points=[CommandHandler("enviarmensagem", enviar_mensagem)],
+    conv_handler_msg = ConversationHandler(
+        entry_points=[CommandHandler("enviar", enviar_mensagem)],
         states={
             ESCOLHER_MENSAGEM: [MessageHandler(filters.TEXT & ~filters.COMMAND, escolher_mensagem)],
         },
-        fallbacks=[CommandHandler("cancel", cancel)]
+        fallbacks=[CommandHandler("cancel", cancelar)]
     )
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(conv_add)
-    application.add_handler(conv_msg)
-    application.add_handler(CommandHandler("listclientes", list_clientes))
-    application.add_handler(CommandHandler("renovarcliente", renovar_cliente))
-    application.add_handler(CallbackQueryHandler(callback_opcoes, pattern="^(renovar|cancelar):"))
-    application.add_handler(CommandHandler("exportar", exportar))
-    application.add_handler(CommandHandler("relatorio", relatorio))
-    application.add_handler(CommandHandler("cancel", cancel))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("listar", list_clientes))
+    app.add_handler(CommandHandler("renovar", renovar_cliente))
+    app.add_handler(CommandHandler("exportar", exportar))
+    app.add_handler(CommandHandler("relatorio", relatorio))
+    app.add_handler(conv_handler_add)
+    app.add_handler(conv_handler_msg)
+    app.add_handler(CallbackQueryHandler(callback_opcoes))
 
-    # Mapeamento dos botões do menu principal para as funções
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^➕ Adicionar Cliente$"), add_cliente))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^📋 Listar Clientes$"), list_clientes))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^🔄 Renovar Plano$"), renovar_cliente))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^📊 Relatório$"), relatorio))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^📤 Exportar Dados$"), exportar))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^❌ Cancelar Operação$"), cancel))
-
-    application.run_polling()
+    print("Bot rodando...")
+    app.run_polling()
 
 if __name__ == "__main__":
     main()

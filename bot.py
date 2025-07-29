@@ -17,24 +17,23 @@ DB_PATH = "clientes.db"
 
 ADMIN_CHAT_ID = 123456789  # <<< SUBSTITUA PELO SEU CHAT_ID REAL
 
-# Estados de conversação
-ADD_NAME, ADD_PHONE, ADD_PACOTE, ADD_PLANO, ADD_SERVIDOR, ESCOLHER_MENSAGEM, ALTERAR_VENCIMENTO = range(7)
+ADD_NAME, ADD_PHONE, ADD_PACOTE, ADD_PLANO, ADD_SERVIDOR, ALTERAR_VENCIMENTO = range(6)
+ESCOLHER_MENSAGEM = 6
 
 PACOTES = ["1 mês", "3 meses", "6 meses", "1 ano"]
 PLANOS = [30, 35, 40, 45, 60, 65, 70, 90, 110, 135]
 
-# Servidores com emojis
-SERVIDORES = {
-    "Fast Play": "🚀",
-    "Genial TV": "📺",
-    "EITV": "🎬",
-    "Gold Play": "💰",
-    "Slim TV": "📡",
-    "UniTV": "🎥",
-    "Live21": "🔴",
-    "ZTech Play": "⚙️",
-    "XServer Play": "🖥️"
-}
+SERVIDORES = [
+    ("fast play", "⚡"),
+    ("genial tv", "🎯"),
+    ("eitv", "📺"),
+    ("gold play", "🏆"),
+    ("slim tv", "🎬"),
+    ("unitv", "🧩"),
+    ("live21", "🌐"),
+    ("ztech play", "🔧"),
+    ("xserver play", "🚀")
+]
 
 mensagens_padrao = {
     "promo": "📢 Olá {nome}, confira nossa promoção especial!",
@@ -46,9 +45,8 @@ mensagens_padrao = {
 def teclado_principal():
     teclado = [
         ["➕ Adicionar Cliente", "📋 Listar Clientes"],
-        ["🔄 Renovar Plano", "📊 Relatório"],
-        ["📤 Exportar Dados", "❌ Cancelar Operação"],
-        ["⏰ Filtrar Vencimentos"]
+        ["⏰ Filtrar Vencimentos", "📊 Relatório"],
+        ["📤 Exportar Dados", "❌ Cancelar Operação"]
     ]
     return ReplyKeyboardMarkup(teclado, resize_keyboard=True)
 
@@ -63,8 +61,8 @@ def criar_tabela():
             pacote TEXT,
             plano REAL,
             vencimento TEXT,
-            chat_id INTEGER,
-            servidor TEXT
+            servidor TEXT,
+            chat_id INTEGER
         )
     ''')
     cursor.execute('''
@@ -87,8 +85,6 @@ def get_duracao_meses(pacote):
     mapa = {"1 mês": 1, "3 meses": 3, "6 meses": 6, "1 ano": 12}
     return mapa.get(pacote, 1)
 
-# ------------------ HANDLERS ------------------
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Bem-vindo ao Bot de Gestão de Clientes!\n\n"
@@ -96,7 +92,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=teclado_principal()
     )
 
-# --- ADD CLIENTE ---
+# === ADICIONAR CLIENTE ===
 
 async def add_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Digite o nome do cliente:", reply_markup=ReplyKeyboardRemove())
@@ -135,29 +131,28 @@ async def add_plano(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("❗ Valor inválido. Tente novamente.")
         return ADD_PLANO
-
     context.user_data['plano'] = plano
 
-    # Agora pedir para escolher o servidor
-    buttons = [
-        [KeyboardButton(f"{emoji} {nome}")] for nome, emoji in SERVIDORES.items()
-    ]
+    # Agora escolha o servidor
+    buttons = [[KeyboardButton(f"{emoji} {nome}")] for nome, emoji in SERVIDORES]
     await update.message.reply_text(
-        "🌐 Escolha o servidor:",
+        "🌐 Escolha o servidor para o cliente:",
         reply_markup=ReplyKeyboardMarkup(buttons, one_time_keyboard=True, resize_keyboard=True)
     )
     return ADD_SERVIDOR
 
 async def add_servidor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto = update.message.text.strip()
-    # Remover emoji e espaço, se existir
-    for nome, emoji in SERVIDORES.items():
-        if texto == f"{emoji} {nome}" or texto == nome:
-            context.user_data['servidor'] = nome
+    # texto esperado: "⚡ fast play" ou "fast play" ou "⚡ fast play" (vamos aceitar qualquer um que contenha o nome do servidor)
+    escolhido = None
+    for nome, emoji in SERVIDORES:
+        if nome in texto.lower():
+            escolhido = nome
             break
-    else:
-        await update.message.reply_text("❗ Servidor inválido. Tente novamente.")
+    if not escolhido:
+        await update.message.reply_text("Servidor inválido. Tente novamente.")
         return ADD_SERVIDOR
+    context.user_data['servidor'] = escolhido
 
     nome = context.user_data['nome']
     telefone = context.user_data['telefone']
@@ -178,8 +173,8 @@ async def add_servidor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     vencimento = (datetime.now().date() + relativedelta(months=meses)).strftime("%Y-%m-%d")
 
     cursor.execute(
-        "INSERT INTO clientes (nome, telefone, pacote, plano, vencimento, chat_id, servidor) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (nome, telefone, pacote, plano, vencimento, chat_id, servidor)
+        "INSERT INTO clientes (nome, telefone, pacote, plano, vencimento, servidor, chat_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (nome, telefone, pacote, plano, vencimento, servidor, chat_id)
     )
     conn.commit()
     conn.close()
@@ -190,16 +185,11 @@ async def add_servidor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return ConversationHandler.END
 
-# --- LISTAR CLIENTES COM FILTROS ---
-
-def formatar_cliente_texto(cliente):
-    nome, telefone, pacote, plano, vencimento, servidor = cliente
-    return f"{nome} ({telefone})\nPacote: {pacote} - Plano: R${plano}\nVence em: {vencimento}\nServidor: {servidor}"
-
+# === LISTAR CLIENTES (exemplo simplificado para mostrar opções) ===
 async def listar_clientes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
-    cursor.execute("SELECT nome, telefone, pacote, plano, vencimento, servidor FROM clientes ORDER BY vencimento")
+    cursor.execute("SELECT nome, telefone FROM clientes ORDER BY nome")
     clientes = cursor.fetchall()
     conn.close()
 
@@ -207,67 +197,13 @@ async def listar_clientes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Nenhum cliente cadastrado.", reply_markup=teclado_principal())
         return
 
-    buttons = [
-        [InlineKeyboardButton(formatar_cliente_texto(c), callback_data=f"cliente:{c[1]}")] for c in clientes
-    ]
+    buttons = []
+    for nome, telefone in clientes:
+        buttons.append([InlineKeyboardButton(f"{nome} ({telefone})", callback_data=f"cliente:{telefone}")])
+    teclado = InlineKeyboardMarkup(buttons)
+    await update.message.reply_text("Selecione um cliente:", reply_markup=teclado)
 
-    await update.message.reply_text(
-        "Clientes cadastrados:",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
-
-async def filtrar_vencimentos(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    teclado = [
-        [KeyboardButton("Vence em 2 dias")],
-        [KeyboardButton("Vence em 1 dia")],
-        [KeyboardButton("Vence hoje")],
-        [KeyboardButton("Vencido há 1 dia")],
-        [KeyboardButton("Cancelar")]
-    ]
-    await update.message.reply_text("Selecione o filtro desejado:", reply_markup=ReplyKeyboardMarkup(teclado, one_time_keyboard=True, resize_keyboard=True))
-
-async def aplicar_filtro(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    texto = update.message.text.strip()
-    hoje = datetime.now().date()
-
-    if texto == "Cancelar":
-        await update.message.reply_text("Operação cancelada.", reply_markup=teclado_principal())
-        return ConversationHandler.END
-
-    if texto == "Vence em 2 dias":
-        data_alvo = hoje + relativedelta(days=2)
-    elif texto == "Vence em 1 dia":
-        data_alvo = hoje + relativedelta(days=1)
-    elif texto == "Vence hoje":
-        data_alvo = hoje
-    elif texto == "Vencido há 1 dia":
-        data_alvo = hoje - relativedelta(days=1)
-    else:
-        await update.message.reply_text("Filtro inválido. Tente novamente.")
-        return
-
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    cursor = conn.cursor()
-    cursor.execute("SELECT nome, telefone, pacote, plano, vencimento, servidor FROM clientes WHERE vencimento = ? ORDER BY vencimento", (data_alvo.strftime("%Y-%m-%d"),))
-    clientes = cursor.fetchall()
-    conn.close()
-
-    if not clientes:
-        await update.message.reply_text("Nenhum cliente encontrado para o filtro selecionado.", reply_markup=teclado_principal())
-        return ConversationHandler.END
-
-    buttons = [
-        [InlineKeyboardButton(formatar_cliente_texto(c), callback_data=f"cliente:{c[1]}")] for c in clientes
-    ]
-
-    await update.message.reply_text(
-        f"Clientes com vencimento em {data_alvo.strftime('%Y-%m-%d')}:",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
-    return ConversationHandler.END
-
-# --- CALLBACKS DE OPÇÕES DO CLIENTE ---
-
+# === CALLBACK DOS CLIENTES (botões dentro do cliente) ===
 async def callback_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -287,163 +223,250 @@ async def callback_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
     nome, pacote, plano, vencimento, servidor = result
 
     teclado = [
+        [InlineKeyboardButton("✉️ Enviar Mensagem", callback_data=f"enviar_msg:{telefone}")],
         [InlineKeyboardButton("🔄 Renovar Plano", callback_data=f"renovar:{telefone}")],
         [InlineKeyboardButton("🗓 Alterar Vencimento", callback_data=f"alterar_venc:{telefone}")],
         [InlineKeyboardButton("🗑 Remover Cliente", callback_data=f"remover:{telefone}")],
-        [InlineKeyboardButton("🔙 Voltar", callback_data="voltar")]
+        [InlineKeyboardButton("🔙 Voltar", callback_data="voltar_lista")]
     ]
-
-    await query.edit_message_text(
-        f"Cliente: {nome}\nPacote: {pacote}\nPlano: R${plano}\nVencimento: {vencimento}\nServidor: {servidor}",
-        reply_markup=InlineKeyboardMarkup(teclado)
+    texto = (
+        f"👤 {nome}\n"
+        f"📞 {telefone}\n"
+        f"📦 Pacote: {pacote}\n"
+        f"💰 Plano: R$ {plano:.2f}\n"
+        f"🗓 Vencimento: {vencimento}\n"
+        f"🌐 Servidor: {servidor}"
     )
+    await query.edit_message_text(texto, reply_markup=InlineKeyboardMarkup(teclado))
 
-async def callback_opcoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# === ENVIAR MENSAGEM (abre link WhatsApp) ===
+async def enviar_mensagem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    data = query.data
 
-    if data.startswith("renovar:"):
-        telefone = data.split(":")[1]
-        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute("SELECT nome, pacote, plano, vencimento FROM clientes WHERE telefone = ?", (telefone,))
-        result = cursor.fetchone()
-        if not result:
-            await query.edit_message_text("Cliente não encontrado.")
-            conn.close()
-            return ConversationHandler.END
+    telefone = query.data.split(":")[1]
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    cursor = conn.cursor()
+    cursor.execute("SELECT nome FROM clientes WHERE telefone = ?", (telefone,))
+    res = cursor.fetchone()
+    conn.close()
 
-        nome, pacote, plano, vencimento_str = result
-        meses = get_duracao_meses(pacote)
-        vencimento_atual = datetime.strptime(vencimento_str, "%Y-%m-%d").date()
-
-        base_data = max(datetime.now().date(), vencimento_atual)
-        novo_venc = (base_data + relativedelta(months=meses)).strftime("%Y-%m-%d")
-
-        cursor.execute("UPDATE clientes SET vencimento = ? WHERE telefone = ?", (novo_venc, telefone))
-        cursor.execute(
-            "INSERT INTO renovacoes (telefone, data_renovacao, novo_vencimento, pacote, plano) VALUES (?, ?, ?, ?, ?)",
-            (telefone, datetime.now().strftime("%Y-%m-%d"), novo_venc, pacote, plano)
-        )
-        conn.commit()
-        conn.close()
-
-        await query.edit_message_text(f"✅ Plano renovado para {nome} até {novo_venc}.")
-        return ConversationHandler.END
-
-    elif data.startswith("alterar_venc:"):
-        telefone = data.split(":")[1]
-        context.user_data['telefone_alterar'] = telefone
-        await query.edit_message_text("Por favor, envie a nova data de vencimento no formato AAAA-MM-DD (ex: 2025-08-31)")
-        return ALTERAR_VENCIMENTO
-
-    elif data.startswith("remover:"):
-        telefone = data.split(":")[1]
-        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute("SELECT nome FROM clientes WHERE telefone = ?", (telefone,))
-        res = cursor.fetchone()
-        if not res:
-            await query.edit_message_text("Cliente não encontrado.")
-            conn.close()
-            return ConversationHandler.END
-        nome = res[0]
-        cursor.execute("DELETE FROM clientes WHERE telefone = ?", (telefone,))
-        conn.commit()
-        conn.close()
-        await query.edit_message_text(f"🗑 Cliente {nome} removido.")
-        return ConversationHandler.END
-
-    elif data.startswith("cliente:"):
-        await callback_cliente(update, context)
+    if not res:
+        await query.edit_message_text("Cliente não encontrado.")
         return
 
-    elif data == "voltar":
-        await query.edit_message_text(
-            "Menu Principal:",
-            reply_markup=teclado_principal()
-        )
-        return ConversationHandler.END
+    nome = res[0]
 
-    else:
-        await query.edit_message_text("Opção desconhecida.")
-        return ConversationHandler.END
+    # Criar link WhatsApp
+    texto_msg = f"Olá {nome}, tudo bem? Esta é uma mensagem automática do seu plano."
+    texto_encoded = re.sub(r" ", "%20", texto_msg)
+    link = f"https://wa.me/55{telefone}?text={texto_encoded}"
 
-# --- ALTERAR VENCIMENTO MANUALMENTE ---
+    teclado = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💬 Abrir WhatsApp", url=link)],
+        [InlineKeyboardButton("🔙 Voltar", callback_data=f"cliente:{telefone}")]
+    ])
+    await query.edit_message_text(f"Clique no botão para enviar mensagem para {nome}:", reply_markup=teclado)
 
-async def receber_nova_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# === RENOVAR PLANO ===
+async def renovar_plano(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    telefone = query.data.split(":")[1]
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    cursor = conn.cursor()
+    cursor.execute("SELECT nome, pacote, plano, vencimento FROM clientes WHERE telefone = ?", (telefone,))
+    result = cursor.fetchone()
+    if not result:
+        await query.edit_message_text("Cliente não encontrado.")
+        conn.close()
+        return
+
+    nome, pacote, plano, vencimento_str = result
+    meses = get_duracao_meses(pacote)
+    vencimento_atual = datetime.strptime(vencimento_str, "%Y-%m-%d").date()
+
+    base_data = max(datetime.now().date(), vencimento_atual)
+    novo_venc = (base_data + relativedelta(months=meses)).strftime("%Y-%m-%d")
+
+    cursor.execute("UPDATE clientes SET vencimento = ? WHERE telefone = ?", (novo_venc, telefone))
+    cursor.execute(
+        "INSERT INTO renovacoes (telefone, data_renovacao, novo_vencimento, pacote, plano) VALUES (?, ?, ?, ?, ?)",
+        (telefone, datetime.now().strftime("%Y-%m-%d"), novo_venc, pacote, plano)
+    )
+    conn.commit()
+    conn.close()
+
+    await query.edit_message_text(f"✅ {nome} renovado até {novo_venc}.")
+
+# === ALTERAR VENCIMENTO MANUAL ===
+
+async def alterar_vencimento_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    telefone = query.data.split(":")[1]
+    context.user_data['alterar_vencimento_telefone'] = telefone
+
+    await query.edit_message_text("Digite a nova data de vencimento no formato AAAA-MM-DD:")
+    return ALTERAR_VENCIMENTO
+
+async def alterar_vencimento_receber(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto = update.message.text.strip()
-    telefone = context.user_data.get('telefone_alterar')
-
+    telefone = context.user_data.get('alterar_vencimento_telefone')
     try:
         nova_data = datetime.strptime(texto, "%Y-%m-%d").date()
-        if nova_data < datetime.now().date():
-            await update.message.reply_text("❌ Data não pode ser menor que hoje. Envie uma data válida.")
-            return ALTERAR_VENCIMENTO
     except ValueError:
-        await update.message.reply_text("❌ Formato inválido. Use AAAA-MM-DD.")
+        await update.message.reply_text("Data inválida. Use o formato AAAA-MM-DD. Tente novamente.")
         return ALTERAR_VENCIMENTO
 
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
-
-    cursor.execute("SELECT nome FROM clientes WHERE telefone = ?", (telefone,))
-    res = cursor.fetchone()
-    if not res:
-        await update.message.reply_text("Cliente não encontrado.")
-        conn.close()
-        return ConversationHandler.END
-
-    nome = res[0]
-
     cursor.execute("UPDATE clientes SET vencimento = ? WHERE telefone = ?", (nova_data.strftime("%Y-%m-%d"), telefone))
     conn.commit()
     conn.close()
 
-    await update.message.reply_text(f"✅ Vencimento de {nome} alterado para {nova_data.strftime('%Y-%m-%d')}.", reply_markup=teclado_principal())
-
+    await update.message.reply_text(f"✅ Vencimento atualizado para {nova_data.strftime('%Y-%m-%d')}.", reply_markup=teclado_principal())
     return ConversationHandler.END
 
-# --- CANCELAR ---
+# === REMOVER CLIENTE ===
+async def remover_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
 
-async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Operação cancelada.", reply_markup=teclado_principal())
-    return ConversationHandler.END
+    telefone = query.data.split(":")[1]
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM clientes WHERE telefone = ?", (telefone,))
+    conn.commit()
+    conn.close()
 
-# --- MAIN ---
+    await query.edit_message_text("🗑️ Cliente removido.")
+
+# === FILTRAR VENCIMENTOS ===
+async def filtrar_vencimentos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    buttons = [
+        [KeyboardButton("2 dias para vencer")],
+        [KeyboardButton("1 dia para vencer")],
+        [KeyboardButton("Vence hoje")],
+        [KeyboardButton("Vencido há 1 dia")],
+        [KeyboardButton("Voltar")]
+    ]
+    await update.message.reply_text(
+        "Escolha o filtro de vencimento:",
+        reply_markup=ReplyKeyboardMarkup(buttons, one_time_keyboard=True, resize_keyboard=True)
+    )
+
+async def processar_filtro(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    texto = update.message.text.strip()
+    hoje = datetime.now().date()
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    cursor = conn.cursor()
+
+    if texto == "2 dias para vencer":
+        filtro = hoje + relativedelta(days=2)
+        cursor.execute("SELECT nome, telefone, vencimento FROM clientes WHERE vencimento = ?", (filtro.strftime("%Y-%m-%d"),))
+    elif texto == "1 dia para vencer":
+        filtro = hoje + relativedelta(days=1)
+        cursor.execute("SELECT nome, telefone, vencimento FROM clientes WHERE vencimento = ?", (filtro.strftime("%Y-%m-%d"),))
+    elif texto == "Vence hoje":
+        filtro = hoje
+        cursor.execute("SELECT nome, telefone, vencimento FROM clientes WHERE vencimento = ?", (filtro.strftime("%Y-%m-%d"),))
+    elif texto == "Vencido há 1 dia":
+        filtro = hoje - relativedelta(days=1)
+        cursor.execute("SELECT nome, telefone, vencimento FROM clientes WHERE vencimento = ?", (filtro.strftime("%Y-%m-%d"),))
+    elif texto == "Voltar":
+        await update.message.reply_text("Voltando ao menu principal.", reply_markup=teclado_principal())
+        return
+    else:
+        await update.message.reply_text("Filtro inválido. Tente novamente.")
+        return
+
+    clientes = cursor.fetchall()
+    conn.close()
+
+    if not clientes:
+        await update.message.reply_text("Nenhum cliente encontrado para esse filtro.", reply_markup=teclado_principal())
+        return
+
+    msg = "Clientes encontrados:\n\n"
+    for nome, telefone, venc in clientes:
+        msg += f"{nome} - {telefone} - vence em {venc}\n"
+    await update.message.reply_text(msg, reply_markup=teclado_principal())
+
+# === CONVERSATION HANDLERS ===
+
+conv_handler_add = ConversationHandler(
+    entry_points=[MessageHandler(filters.Regex("^➕ Adicionar Cliente$"), add_cliente)],
+    states={
+        ADD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_name)],
+        ADD_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_phone)],
+        ADD_PACOTE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_pacote)],
+        ADD_PLANO: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_plano)],
+        ADD_SERVIDOR: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_servidor)],
+    },
+    fallbacks=[CommandHandler("cancel", lambda u,c: ConversationHandler.END)],
+)
+
+conv_handler_alterar_venc = ConversationHandler(
+    entry_points=[CallbackQueryHandler(alterar_vencimento_start, pattern=r"alterar_venc:")],
+    states={
+        ALTERAR_VENCIMENTO: [MessageHandler(filters.TEXT & ~filters.COMMAND, alterar_vencimento_receber)]
+    },
+    fallbacks=[CommandHandler("cancel", lambda u,c: ConversationHandler.END)],
+)
+
+# === MAIN ===
+
+async def mensagem_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+
+    if text == "📋 Listar Clientes":
+        await listar_clientes(update, context)
+    elif text == "⏰ Filtrar Vencimentos":
+        await filtrar_vencimentos(update, context)
+    elif text in ["2 dias para vencer", "1 dia para vencer", "Vence hoje", "Vencido há 1 dia", "Voltar"]:
+        await processar_filtro(update, context)
+    elif text == "❌ Cancelar Operação":
+        await update.message.reply_text("Operação cancelada.", reply_markup=teclado_principal())
+    else:
+        await update.message.reply_text("Opção inválida. Use o menu.", reply_markup=teclado_principal())
+
+async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    data = query.data
+
+    if data.startswith("cliente:"):
+        await callback_cliente(update, context)
+    elif data.startswith("enviar_msg:"):
+        await enviar_mensagem(update, context)
+    elif data.startswith("renovar:"):
+        await renovar_plano(update, context)
+    elif data.startswith("alterar_venc:"):
+        await alterar_vencimento_start(update, context)
+    elif data.startswith("remover:"):
+        await remover_cliente(update, context)
+    elif data == "voltar_lista":
+        # Voltar para listar clientes
+        await listar_clientes(update, context)
+    else:
+        await query.answer("Ação desconhecida.")
 
 def main():
     criar_tabela()
 
-    application = ApplicationBuilder().token(TOKEN).build()
+    app = ApplicationBuilder().token(TOKEN).build()
 
-    conv_handler = ConversationHandler(
-        entry_points=[
-            CommandHandler('start', start),
-            MessageHandler(filters.Regex("➕ Adicionar Cliente"), add_cliente),
-            MessageHandler(filters.Regex("📋 Listar Clientes"), listar_clientes),
-            MessageHandler(filters.Regex("⏰ Filtrar Vencimentos"), filtrar_vencimentos),
-            MessageHandler(filters.Regex("Cancelar"), cancelar),
-            MessageHandler(filters.Regex("Vence em 2 dias|Vence em 1 dia|Vence hoje|Vencido há 1 dia"), aplicar_filtro)
-        ],
-        states={
-            ADD_NAME: [MessageHandler(filters.TEXT & (~filters.COMMAND), add_name)],
-            ADD_PHONE: [MessageHandler(filters.TEXT & (~filters.COMMAND), add_phone)],
-            ADD_PACOTE: [MessageHandler(filters.TEXT & (~filters.COMMAND), add_pacote)],
-            ADD_PLANO: [MessageHandler(filters.TEXT & (~filters.COMMAND), add_plano)],
-            ADD_SERVIDOR: [MessageHandler(filters.TEXT & (~filters.COMMAND), add_servidor)],
-            ALTERAR_VENCIMENTO: [MessageHandler(filters.TEXT & (~filters.COMMAND), receber_nova_data)],
-        },
-        fallbacks=[CommandHandler('cancelar', cancelar)]
-    )
+    app.add_handler(CommandHandler("start", start))
 
-    application.add_handler(conv_handler)
+    app.add_handler(conv_handler_add)
+    app.add_handler(conv_handler_alterar_venc)
 
-    # CallbackQueryHandler para os botões inline
-    application.add_handler(CallbackQueryHandler(callback_opcoes, pattern=r"renovar:|alterar_venc:|cliente:|voltar|remover:"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, mensagem_handler))
+    app.add_handler(CallbackQueryHandler(callback_query_handler))
 
-    application.run_polling()
+    app.run_polling()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

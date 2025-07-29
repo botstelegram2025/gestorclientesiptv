@@ -3,7 +3,6 @@ import csv
 import re
 import sqlite3
 import tempfile
-import requests
 from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from telegram import (
@@ -19,7 +18,7 @@ TOKEN = os.getenv("BOT_TOKEN")
 DB_PATH = "clientes.db"
 
 ADD_NAME, ADD_PHONE, ADD_PACOTE, ADD_PLANO = range(4)
-SEND_CLIENTE, SEND_MSG, ESCOLHER_MENSAGEM = range(4, 7)
+ESCOLHER_MENSAGEM = 4
 
 PACOTES = ["1 mês", "3 meses", "6 meses", "1 ano"]
 PLANOS = [30, 35, 40, 45, 60, 65, 70, 90, 110, 135]
@@ -82,11 +81,11 @@ def agendar_lembretes(bot, nome, telefone, vencimento):
         1: "lembrete",
         3: "lembrete"
     }
-    for dias in datas:
+    for dias, tipo_msg in datas.items():
         quando = datetime.strptime(vencimento, "%Y-%m-%d") - timedelta(days=dias)
         if quando > datetime.now():
             scheduler.add_job(
-                lambda n=nome, t=telefone, k=datas[dias]: bot.send_message(chat_id=t, text=mensagens_padrao[k].format(nome=n)),
+                lambda n=nome, t=telefone, k=tipo_msg: bot.send_message(chat_id=t, text=mensagens_padrao[k].format(nome=n)),
                 'date', run_date=quando
             )
 
@@ -332,5 +331,5 @@ def main():
 
     application.run_polling()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

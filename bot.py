@@ -1,9 +1,8 @@
 import os
-import csv
 import re
 import sqlite3
-import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime
+from dateutil.relativedelta import relativedelta
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton,
     ReplyKeyboardMarkup, ReplyKeyboardRemove
@@ -16,21 +15,12 @@ from telegram.ext import (
 TOKEN = os.getenv("BOT_TOKEN")
 DB_PATH = "clientes.db"
 
-# Coloque aqui o chat_id do admin para receber os avisos
 ADMIN_CHAT_ID = 123456789  # <<< SUBSTITUA PELO SEU CHAT_ID REAL
 
 ADD_NAME, ADD_PHONE, ADD_PACOTE, ADD_PLANO = range(4)
-ESCOLHER_MENSAGEM = 4
 
 PACOTES = ["1 mês", "3 meses", "6 meses", "1 ano"]
 PLANOS = [30, 35, 40, 45, 60, 65, 70, 90, 110, 135]
-
-mensagens_padrao = {
-    "promo": "📢 Olá {nome}, confira nossa promoção especial!",
-    "lembrete": "⏰ Olá {nome}, só passando para lembrar do seu compromisso amanhã.",
-    "vencimento_hoje": "⚠️ Olá {nome}, seu plano vence hoje!",
-    "vencido": "❌ Olá {nome}, seu plano está vencido desde ontem."
-}
 
 def teclado_principal():
     teclado = [
@@ -122,7 +112,7 @@ async def add_plano(update: Update, context: ContextTypes.DEFAULT_TYPE):
     nome = context.user_data['nome']
     telefone = context.user_data['telefone']
     pacote = context.user_data['pacote']
-    chat_id = update.effective_chat.id  # capturando chat_id do usuário que está cadastrando
+    chat_id = update.effective_chat.id
 
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
@@ -133,7 +123,8 @@ async def add_plano(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     meses = get_duracao_meses(pacote)
-    vencimento = (datetime.now() + timedelta(days=30 * meses)).strftime("%Y-%m-%d")
+    vencimento = (datetime.now().date() + relativedelta(months=meses)).strftime("%Y-%m-%d")
+
     cursor.execute(
         "INSERT INTO clientes (nome, telefone, pacote, plano, vencimento, chat_id) VALUES (?, ?, ?, ?, ?, ?)",
         (nome, telefone, pacote, plano, vencimento, chat_id)
@@ -147,62 +138,56 @@ async def add_plano(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return ConversationHandler.END
 
-async def list_clientes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def listar_clientes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
-    cursor.execute("SELECT nome, telefone, pacote, plano, vencimento FROM clientes")
-    lista = cursor.fetchall()
+    cursor.execute("SELECT nome, telefone, pacote, plano, vencimento FROM clientes ORDER BY nome")
+    clientes = cursor.fetchall()
     conn.close()
 
-    if not lista:
-        await update.message.reply_text("Nenhum cliente cadastrado.")
+    if not clientes:
+        await update.message.reply_text("Nenhum cliente cadastrado.", reply_markup=teclado_principal())
         return
 
-    msg = "👥 Clientes cadastrados:\n"
-    for nome, telefone, pacote, plano, venc in lista:
-        venc_formatado = datetime.strptime(venc, '%Y-%m-%d').strftime('%d/%m/%Y')
-        msg += f"- {nome} ({telefone}): R$ {plano:.2f} ({pacote}) até {venc_formatado}\n"
-    await update.message.reply_text(msg)
+    buttons = []
+    for nome, telefone, pacote, plano, vencimento in clientes:
+        label = f"{nome} - {telefone} - {pacote} até {vencimento}"
+        buttons.append([
+            InlineKeyboardButton(f"🔄 Renovar", callback_data=f"renovar:{telefone}"),
+            InlineKeyboardButton(f"❌ Cancelar", callback_data=f"cancelar:{telefone}")
+        ])
+        buttons.append([InlineKeyboardButton(label, callback_data="ignore")])
 
-async def renovar_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    cursor = conn.cursor()
-    cursor.execute("SELECT nome, telefone, vencimento FROM clientes")
-    lista = cursor.fetchall()
-    conn.close()
-
-    if not lista:
-        await update.message.reply_text("Nenhum cliente cadastrado para renovação.")
-        return
-
-    keyboard = [
-        [
-            InlineKeyboardButton(f"🔁 {nome} - {vencimento}", callback_data=f"renovar:{telefone}"),
-            InlineKeyboardButton("🗑️ Cancelar", callback_data=f"cancelar:{telefone}")
-        ] for nome, telefone, vencimento in lista
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("👥 Selecione um cliente:", reply_markup=reply_markup)
+    markup = InlineKeyboardMarkup(buttons)
+    await update.message.reply_text("Lista de clientes:", reply_markup=markup)
 
 async def callback_opcoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
 
+    if data == "ignore":
+        return
+
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
 
     if data.startswith("renovar:"):
         telefone = data.split(":")[1]
-        cursor.execute("SELECT nome, pacote, plano FROM clientes WHERE telefone = ?", (telefone,))
+        cursor.execute("SELECT nome, pacote, plano, vencimento FROM clientes WHERE telefone = ?", (telefone,))
         result = cursor.fetchone()
         if not result:
             await query.edit_message_text("Cliente não encontrado.")
             conn.close()
             return
-        nome, pacote, plano = result
+
+        nome, pacote, plano, vencimento_str = result
         meses = get_duracao_meses(pacote)
-        novo_venc = (datetime.now() + timedelta(days=30 * meses)).strftime("%Y-%m-%d")
+        vencimento_atual = datetime.strptime(vencimento_str, "%Y-%m-%d").date()
+
+        base_data = max(datetime.now().date(), vencimento_atual)
+        novo_venc = (base_data + relativedelta(months=meses)).strftime("%Y-%m-%d")
+
         cursor.execute("UPDATE clientes SET vencimento = ? WHERE telefone = ?", (novo_venc, telefone))
         cursor.execute(
             "INSERT INTO renovacoes (telefone, data_renovacao, novo_vencimento, pacote, plano) VALUES (?, ?, ?, ?, ?)",
@@ -220,146 +205,34 @@ async def callback_opcoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
         await query.edit_message_text("🗑️ Cliente removido.")
 
-async def exportar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM clientes")
-    rows = cursor.fetchall()
-    conn.close()
-
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".csv", mode="w", newline="") as tmpfile:
-        writer = csv.writer(tmpfile)
-        writer.writerow(["ID", "Nome", "Telefone", "Pacote", "Plano", "Vencimento", "Chat_ID"])
-        writer.writerows(rows)
-        tmpfile_path = tmpfile.name
-
-    await update.message.reply_document(document=open(tmpfile_path, "rb"), filename="clientes_export.csv")
-    os.remove(tmpfile_path)
-
-async def relatorio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM renovacoes")
-    rows = cursor.fetchall()
-    conn.close()
-
-    if not rows:
-        await update.message.reply_text("Nenhuma renovação registrada.")
-        return
-
-    msg = "📋 Log de renovações:\n"
-    for _, tel, data, venc, pacote, plano in rows:
-        msg += f"{tel} - {data} -> {venc} ({pacote}, R$ {plano})\n"
-    await update.message.reply_text(msg)
-
-async def enviar_mensagem(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[KeyboardButton(f"📨 {k}")] for k in mensagens_padrao.keys()]
-    await update.message.reply_text("Escolha uma mensagem para enviar:", reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True))
-    return ESCOLHER_MENSAGEM
-
-async def escolher_mensagem(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chave = update.message.text.replace("📨 ", "")
-    if chave not in mensagens_padrao:
-        await update.message.reply_text("Mensagem inválida. Tente novamente.")
-        return ESCOLHER_MENSAGEM
-    context.user_data['msg_escolhida'] = chave
-
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    cursor = conn.cursor()
-    cursor.execute("SELECT nome, telefone, chat_id FROM clientes")
-    clientes = cursor.fetchall()
-    conn.close()
-
-    count = 0
-    for nome, telefone, chat_id_cliente in clientes:
-        texto = mensagens_padrao[chave].format(nome=nome)
-        try:
-            await context.bot.send_message(chat_id=chat_id_cliente or update.effective_chat.id, text=texto)
-            count += 1
-        except Exception:
-            pass
-
-    await update.message.reply_text(f"✅ Mensagem enviada para {count} clientes.", reply_markup=teclado_principal())
-    return ConversationHandler.END
-
-async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cancelar_operacao(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Operação cancelada.", reply_markup=teclado_principal())
     return ConversationHandler.END
 
-# Função que lembra o admin dos vencimentos
-async def lembrar_admin_vencimentos(context: ContextTypes.DEFAULT_TYPE):
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    cursor = conn.cursor()
-
-    hoje = datetime.now().date()
-    datas_aviso = {
-        "3 dias": hoje + timedelta(days=3),
-        "1 dia": hoje + timedelta(days=1),
-        "vencimento hoje": hoje,
-        "1 dia após": hoje - timedelta(days=1),
-    }
-
-    resultados = {k: [] for k in datas_aviso.keys()}
-
-    cursor.execute("SELECT nome, telefone, vencimento FROM clientes")
-    for nome, telefone, vencimento_str in cursor.fetchall():
-        vencimento = datetime.strptime(vencimento_str, "%Y-%m-%d").date()
-        for label, data_alvo in datas_aviso.items():
-            if vencimento == data_alvo:
-                resultados[label].append(f"{nome} ({telefone}) - vence em {vencimento.strftime('%d/%m/%Y')}")
-                break
-
-    conn.close()
-
-    msg = "📅 *Resumo de vencimentos de clientes*\n\n"
-    tem_alerta = False
-    for label in ["3 dias", "1 dia", "vencimento hoje", "1 dia após"]:
-        clientes = resultados[label]
-        if clientes:
-            tem_alerta = True
-            msg += f"*{label.upper()}*:\n" + "\n".join(clientes) + "\n\n"
-
-    if not tem_alerta:
-        msg = "✅ Nenhum cliente para alertar hoje."
-
-    await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=msg, parse_mode="Markdown")
+async def mensagem_nao_reconhecida(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Comando não reconhecido. Use o menu abaixo.", reply_markup=teclado_principal())
 
 def main():
     criar_tabela()
-
     application = ApplicationBuilder().token(TOKEN).build()
 
     conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^(➕ Adicionar Cliente)$"), add_cliente)],
+        entry_points=[MessageHandler(filters.Regex("^➕ Adicionar Cliente$"), add_cliente)],
         states={
             ADD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_name)],
             ADD_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_phone)],
-            ADD_PACOTE: [MessageHandler(filters.Regex("^📦"), add_pacote)],
-            ADD_PLANO: [MessageHandler(filters.Regex("^💰"), add_plano)],
+            ADD_PACOTE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_pacote)],
+            ADD_PLANO: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_plano)],
         },
-        fallbacks=[CommandHandler("cancelar", cancelar)]
-    )
-
-    conv_mensagem_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^📨"), enviar_mensagem)],
-        states={
-            ESCOLHER_MENSAGEM: [MessageHandler(filters.TEXT & ~filters.COMMAND, escolher_mensagem)]
-        },
-        fallbacks=[CommandHandler("cancelar", cancelar)]
+        fallbacks=[CommandHandler('cancelar', cancelar_operacao), MessageHandler(filters.Regex("^❌ Cancelar Operação$"), cancelar_operacao)],
+        allow_reentry=True,
     )
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(conv_handler)
-    application.add_handler(conv_mensagem_handler)
-    application.add_handler(MessageHandler(filters.Regex("^(📋 Listar Clientes)$"), list_clientes))
-    application.add_handler(MessageHandler(filters.Regex("^(🔄 Renovar Plano)$"), renovar_cliente))
+    application.add_handler(MessageHandler(filters.Regex("^📋 Listar Clientes$"), listar_clientes))
     application.add_handler(CallbackQueryHandler(callback_opcoes))
-    application.add_handler(MessageHandler(filters.Regex("^(📤 Exportar Dados)$"), exportar))
-    application.add_handler(MessageHandler(filters.Regex("^(📊 Relatório)$"), relatorio))
-    application.add_handler(MessageHandler(filters.Regex("^(❌ Cancelar Operação)$"), cancelar))
-
-    # Agenda o job diário para lembrar o admin às 9h
-    application.job_queue.run_daily(lembrar_admin_vencimentos, time=datetime.strptime("09:00", "%H:%M").time())
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, mensagem_nao_reconhecida))
 
     application.run_polling()
 

@@ -24,10 +24,10 @@ PACOTES = ["1 mês", "3 meses", "6 meses", "1 ano"]
 PLANOS = [30, 35, 40, 45, 60, 65, 70, 90, 110, 135]
 
 mensagens_padrao = {
-    "promo": "Olá {nome}, confira nossa promoção especial!",
-    "lembrete": "Olá {nome}, só passando para lembrar do seu compromisso amanhã.",
-    "vencimento_hoje": "Olá {nome}, seu plano vence hoje!",
-    "vencido": "Olá {nome}, seu plano está vencido desde ontem."
+    "promo": "📢 Olá {nome}, confira nossa promoção especial!",
+    "lembrete": "⏰ Olá {nome}, só passando para lembrar do seu compromisso amanhã.",
+    "vencimento_hoje": "⚠️ Olá {nome}, seu plano vence hoje!",
+    "vencido": "❌ Olá {nome}, seu plano está vencido desde ontem."
 }
 
 scheduler = BackgroundScheduler()
@@ -42,7 +42,7 @@ def teclado_principal():
     return ReplyKeyboardMarkup(teclado, resize_keyboard=True)
 
 def criar_tabela():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS clientes (
@@ -72,7 +72,7 @@ def telefone_valido(telefone):
 
 def get_duracao_meses(pacote):
     mapa = {"1 mês": 1, "3 meses": 3, "6 meses": 6, "1 ano": 12}
-    return mapa.get(pacote.lower(), 1)
+    return mapa.get(pacote, 1)
 
 def agendar_lembretes(bot, nome, telefone, vencimento):
     datas = {
@@ -101,68 +101,70 @@ async def add_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ADD_NAME
 
 async def add_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['nome'] = update.message.text
-    await update.message.reply_text("Digite o telefone do cliente (com DDD):")
+    context.user_data['nome'] = update.message.text.strip()
+    await update.message.reply_text("Digite o telefone do cliente (com DDD, somente números):")
     return ADD_PHONE
 
 async def add_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     telefone = update.message.text.strip()
     if not telefone_valido(telefone):
-        await update.message.reply_text("Telefone inválido. Use apenas números com DDD (ex: 11999998888).")
+        await update.message.reply_text("📵 Telefone inválido. Use apenas números com DDD (ex: 11999998888).")
         return ADD_PHONE
     context.user_data['telefone'] = telefone
-    buttons = [[KeyboardButton(p)] for p in PACOTES]
-    await update.message.reply_text("Escolha o pacote do cliente (duração):", reply_markup=ReplyKeyboardMarkup(buttons, one_time_keyboard=True, resize_keyboard=True))
+    buttons = [[KeyboardButton(f"📦 {p}")] for p in PACOTES]
+    await update.message.reply_text("📦 Escolha o pacote do cliente (duração):", reply_markup=ReplyKeyboardMarkup(buttons, one_time_keyboard=True, resize_keyboard=True))
     return ADD_PACOTE
 
 async def add_pacote(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    pacote = update.message.text
+    pacote = update.message.text.replace("📦 ", "")
     if pacote not in PACOTES:
-        await update.message.reply_text("Pacote inválido. Tente novamente.")
+        await update.message.reply_text("❗ Pacote inválido. Tente novamente.")
         return ADD_PACOTE
     context.user_data['pacote'] = pacote
-    buttons = [[KeyboardButton(str(p))] for p in PLANOS]
-    await update.message.reply_text("Escolha o valor do plano:", reply_markup=ReplyKeyboardMarkup(buttons, one_time_keyboard=True, resize_keyboard=True))
+    buttons = [[KeyboardButton(f"💰 {p}")] for p in PLANOS]
+    await update.message.reply_text("💰 Escolha o valor do plano:", reply_markup=ReplyKeyboardMarkup(buttons, one_time_keyboard=True, resize_keyboard=True))
     return ADD_PLANO
 
 async def add_plano(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        plano = float(update.message.text)
+        plano = float(update.message.text.replace("💰 ", ""))
         if plano not in PLANOS:
             raise ValueError
     except ValueError:
-        await update.message.reply_text("Valor inválido. Tente novamente.")
+        await update.message.reply_text("❗ Valor inválido. Tente novamente.")
         return ADD_PLANO
 
     nome = context.user_data['nome']
     telefone = context.user_data['telefone']
     pacote = context.user_data['pacote']
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM clientes WHERE telefone = ?", (telefone,))
     if cursor.fetchone():
-        await update.message.reply_text("⚠️ Cliente com esse telefone já existe.")
+        await update.message.reply_text("⚠️ Cliente com esse telefone já existe.", reply_markup=teclado_principal())
         conn.close()
         return ConversationHandler.END
 
     meses = get_duracao_meses(pacote)
     vencimento = (datetime.now() + timedelta(days=30 * meses)).strftime("%Y-%m-%d")
-    cursor.execute("INSERT INTO clientes (nome, telefone, pacote, plano, vencimento) VALUES (?, ?, ?, ?, ?)",
-                   (nome, telefone, pacote, plano, vencimento))
+    cursor.execute(
+        "INSERT INTO clientes (nome, telefone, pacote, plano, vencimento) VALUES (?, ?, ?, ?, ?)",
+        (nome, telefone, pacote, plano, vencimento)
+    )
     conn.commit()
     conn.close()
 
     agendar_lembretes(context.bot, nome, telefone, vencimento)
 
     await update.message.reply_text(
-        f"✅ Cliente {nome} cadastrado até {vencimento}.",
+        f"✅ Cliente {nome} cadastrado com plano válido até {vencimento}.",
         reply_markup=teclado_principal()
     )
     return ConversationHandler.END
 
 async def list_clientes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute("SELECT nome, telefone, pacote, plano, vencimento FROM clientes")
     lista = cursor.fetchall()
@@ -172,14 +174,14 @@ async def list_clientes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Nenhum cliente cadastrado.")
         return
 
-    msg = "Clientes cadastrados:\n"
+    msg = "👥 Clientes cadastrados:\n"
     for nome, telefone, pacote, plano, venc in lista:
         venc_formatado = datetime.strptime(venc, '%Y-%m-%d').strftime('%d/%m/%Y')
-        msg += f"- {nome} ({telefone}): R${plano:.2f} ({pacote}) até {venc_formatado}\n"
+        msg += f"- {nome} ({telefone}): R$ {plano:.2f} ({pacote}) até {venc_formatado}\n"
     await update.message.reply_text(msg)
 
 async def renovar_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute("SELECT nome, telefone, vencimento FROM clientes")
     lista = cursor.fetchall()
@@ -188,18 +190,18 @@ async def renovar_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [
             InlineKeyboardButton(f"🔁 {nome} - {vencimento}", callback_data=f"renovar:{telefone}"),
-            InlineKeyboardButton("❌ Cancelar", callback_data=f"cancelar:{telefone}")
+            InlineKeyboardButton("🗑️ Cancelar", callback_data=f"cancelar:{telefone}")
         ] for nome, telefone, vencimento in lista
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Selecione um cliente:", reply_markup=reply_markup)
+    await update.message.reply_text("👥 Selecione um cliente:", reply_markup=reply_markup)
 
 async def callback_opcoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
 
     if data.startswith("renovar:"):
@@ -208,13 +210,16 @@ async def callback_opcoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = cursor.fetchone()
         if not result:
             await query.edit_message_text("Cliente não encontrado.")
+            conn.close()
             return
         nome, pacote, plano = result
         meses = get_duracao_meses(pacote)
         novo_venc = (datetime.now() + timedelta(days=30 * meses)).strftime("%Y-%m-%d")
         cursor.execute("UPDATE clientes SET vencimento = ? WHERE telefone = ?", (novo_venc, telefone))
-        cursor.execute("INSERT INTO renovacoes (telefone, data_renovacao, novo_vencimento, pacote, plano) VALUES (?, ?, ?, ?, ?)",
-                       (telefone, datetime.now().strftime("%Y-%m-%d"), novo_venc, pacote, plano))
+        cursor.execute(
+            "INSERT INTO renovacoes (telefone, data_renovacao, novo_vencimento, pacote, plano) VALUES (?, ?, ?, ?, ?)",
+            (telefone, datetime.now().strftime("%Y-%m-%d"), novo_venc, pacote, plano)
+        )
         conn.commit()
         conn.close()
 
@@ -227,10 +232,10 @@ async def callback_opcoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.execute("DELETE FROM clientes WHERE telefone = ?", (telefone,))
         conn.commit()
         conn.close()
-        await query.edit_message_text("❌ Cliente removido.")
+        await query.edit_message_text("🗑️ Cliente removido.")
 
 async def exportar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM clientes")
     rows = cursor.fetchall()
@@ -246,30 +251,37 @@ async def exportar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     os.remove(tmpfile_path)
 
 async def relatorio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM renovacoes")
     rows = cursor.fetchall()
     conn.close()
 
+    if not rows:
+        await update.message.reply_text("Nenhuma renovação registrada.")
+        return
+
     msg = "📋 Log de renovações:\n"
     for _, tel, data, venc, pacote, plano in rows:
-        msg += f"{tel} - {data} -> {venc} ({pacote}, R${plano})\n"
-    await update.message.reply_text(msg or "Nenhuma renovação registrada.")
+        msg += f"{tel} - {data} -> {venc} ({pacote}, R$ {plano})\n"
+    await update.message.reply_text(msg)
 
 async def enviar_mensagem(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[KeyboardButton(k)] for k in mensagens_padrao.keys()]
-    await update.message.reply_text("Escolha o tipo de mensagem para enviar:", reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True))
+    keyboard = [[KeyboardButton(f"📨 {k}")] for k in mensagens_padrao.keys()]
+    await update.message.reply_text(
+        "✉️ Escolha o tipo de mensagem para enviar:",
+        reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+    )
     return ESCOLHER_MENSAGEM
 
 async def escolher_mensagem(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tipo = update.message.text.strip().lower()
+    tipo = update.message.text.strip().replace("📨 ", "")
     mensagem = mensagens_padrao.get(tipo)
     if not mensagem:
-        await update.message.reply_text("Tipo de mensagem inválido.")
+        await update.message.reply_text("❗ Tipo de mensagem inválido.")
         return ESCOLHER_MENSAGEM
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute("SELECT nome, telefone FROM clientes")
     clientes = cursor.fetchall()
@@ -322,6 +334,7 @@ def main():
     application.add_handler(CommandHandler("relatorio", relatorio))
     application.add_handler(CommandHandler("cancel", cancel))
 
+    # Mapeamento dos botões do menu principal para as funções
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^➕ Adicionar Cliente$"), add_cliente))
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^📋 Listar Clientes$"), list_clientes))
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^🔄 Renovar Plano$"), renovar_cliente))

@@ -4,7 +4,6 @@ import re
 import sqlite3
 import tempfile
 from datetime import datetime, timedelta
-from urllib.parse import quote_plus
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton,
     ReplyKeyboardMarkup, ReplyKeyboardRemove
@@ -159,18 +158,11 @@ async def list_clientes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Nenhum cliente cadastrado.")
         return
 
+    msg = "👥 Clientes cadastrados:\n"
     for nome, telefone, pacote, plano, venc in lista:
         venc_formatado = datetime.strptime(venc, '%Y-%m-%d').strftime('%d/%m/%Y')
-        texto = f"👤 {nome}\n📞 {telefone}\n💰 R$ {plano:.2f} ({pacote})\n📅 Vence em {venc_formatado}"
-
-        msg_whatsapp = quote_plus(f"Olá {nome}, tudo bem?")
-        link_whatsapp = f"https://wa.me/{telefone}?text={msg_whatsapp}"
-
-        teclado = InlineKeyboardMarkup([
-            [InlineKeyboardButton("💬 WhatsApp", url=link_whatsapp)]
-        ])
-
-        await update.message.reply_text(texto, reply_markup=teclado)
+        msg += f"- {nome} ({telefone}): R$ {plano:.2f} ({pacote}) até {venc_formatado}\n"
+    await update.message.reply_text(msg)
 
 async def renovar_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -327,43 +319,49 @@ async def lembrar_admin_vencimentos(context: ContextTypes.DEFAULT_TYPE):
             tem_alerta = True
             msg += f"*{label.upper()}*:\n" + "\n".join(clientes) + "\n\n"
 
-    if tem_alerta:
-        try:
-            await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=msg, parse_mode="Markdown")
-        except Exception:
-            pass
+    if not tem_alerta:
+        msg = "✅ Nenhum cliente para alertar hoje."
+
+    await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=msg, parse_mode="Markdown")
 
 def main():
     criar_tabela()
-    app = ApplicationBuilder().token(TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("listar", list_clientes))
-    app.add_handler(CommandHandler("relatorio", relatorio))
-    app.add_handler(CommandHandler("exportar", exportar))
-    app.add_handler(CommandHandler("renovar", renovar_cliente))
-    app.add_handler(CommandHandler("enviar", enviar_mensagem))
-
-    app.add_handler(CallbackQueryHandler(callback_opcoes))
+    application = ApplicationBuilder().token(TOKEN).build()
 
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("add", add_cliente)],
+        entry_points=[MessageHandler(filters.Regex("^(➕ Adicionar Cliente)$"), add_cliente)],
         states={
             ADD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_name)],
             ADD_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_phone)],
-            ADD_PACOTE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_pacote)],
-            ADD_PLANO: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_plano)],
-            ESCOLHER_MENSAGEM: [MessageHandler(filters.TEXT & ~filters.COMMAND, escolher_mensagem)],
+            ADD_PACOTE: [MessageHandler(filters.Regex("^📦"), add_pacote)],
+            ADD_PLANO: [MessageHandler(filters.Regex("^💰"), add_plano)],
         },
-        fallbacks=[CommandHandler("cancelar", cancelar)],
+        fallbacks=[CommandHandler("cancelar", cancelar)]
     )
-    app.add_handler(conv_handler)
 
-    # Job para lembrar admin dos vencimentos diariamente (exemplo: 9h da manhã)
-    app.job_queue.run_daily(lembrar_admin_vencimentos, time=datetime.strptime("09:00", "%H:%M").time())
+    conv_mensagem_handler = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^📨"), enviar_mensagem)],
+        states={
+            ESCOLHER_MENSAGEM: [MessageHandler(filters.TEXT & ~filters.COMMAND, escolher_mensagem)]
+        },
+        fallbacks=[CommandHandler("cancelar", cancelar)]
+    )
 
-    print("Bot rodando...")
-    app.run_polling()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(conv_handler)
+    application.add_handler(conv_mensagem_handler)
+    application.add_handler(MessageHandler(filters.Regex("^(📋 Listar Clientes)$"), list_clientes))
+    application.add_handler(MessageHandler(filters.Regex("^(🔄 Renovar Plano)$"), renovar_cliente))
+    application.add_handler(CallbackQueryHandler(callback_opcoes))
+    application.add_handler(MessageHandler(filters.Regex("^(📤 Exportar Dados)$"), exportar))
+    application.add_handler(MessageHandler(filters.Regex("^(📊 Relatório)$"), relatorio))
+    application.add_handler(MessageHandler(filters.Regex("^(❌ Cancelar Operação)$"), cancelar))
+
+    # Agenda o job diário para lembrar o admin às 9h
+    application.job_queue.run_daily(lembrar_admin_vencimentos, time=datetime.strptime("09:00", "%H:%M").time())
+
+    application.run_polling()
 
 if __name__ == "__main__":
     main()

@@ -4,6 +4,7 @@ import re
 import sqlite3
 import tempfile
 from datetime import datetime, timedelta
+from urllib.parse import quote_plus
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton,
     ReplyKeyboardMarkup, ReplyKeyboardRemove
@@ -147,6 +148,7 @@ async def add_plano(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return ConversationHandler.END
 
+# --- MODIFICAÇÃO AQUI --- #
 async def list_clientes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
@@ -158,11 +160,21 @@ async def list_clientes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Nenhum cliente cadastrado.")
         return
 
-    msg = "👥 Clientes cadastrados:\n"
+    # Envia uma mensagem individual por cliente com botão do WhatsApp
     for nome, telefone, pacote, plano, venc in lista:
         venc_formatado = datetime.strptime(venc, '%Y-%m-%d').strftime('%d/%m/%Y')
-        msg += f"- {nome} ({telefone}): R$ {plano:.2f} ({pacote}) até {venc_formatado}\n"
-    await update.message.reply_text(msg)
+        texto = f"👤 {nome}\n📞 {telefone}\n💰 R$ {plano:.2f} ({pacote})\n📅 Vence em {venc_formatado}"
+
+        # Montar link do WhatsApp com mensagem opcional (urlencoded)
+        mensagem_whatsapp = quote_plus(f"Olá {nome}, tudo bem?")
+        link_whatsapp = f"https://wa.me/{telefone}?text={mensagem_whatsapp}"
+
+        teclado = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💬 WhatsApp", url=link_whatsapp)]
+        ])
+
+        await update.message.reply_text(texto, reply_markup=teclado)
+# --- FIM DA MODIFICAÇÃO --- #
 
 async def renovar_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -302,27 +314,44 @@ async def lembrar_admin_vencimentos(context: ContextTypes.DEFAULT_TYPE):
     resultados = {k: [] for k in datas_aviso.keys()}
 
     cursor.execute("SELECT nome, telefone, vencimento FROM clientes")
-    for nome, telefone, vencimento_str in cursor.fetchall():
-        vencimento = datetime.strptime(vencimento_str, "%Y-%m-%d").date()
-        for label, data_alvo in datas_aviso.items():
-            if vencimento == data_alvo:
-                resultados[label].append(f"{nome} ({telefone}) - vence em {vencimento.strftime('%d/%m/%Y')}")
-                break
-
+    clientes = cursor.fetchall()
     conn.close()
 
-    msg = "📅 *Resumo de vencimentos de clientes*\n\n"
-    tem_alerta = False
-    for label in ["3 dias", "1 dia", "vencimento hoje", "1 dia após"]:
-        clientes = resultados[label]
-        if clientes:
-            tem_alerta = True
-            msg += f"*{label.upper()}*:\n" + "\n".join(clientes) + "\n\n"
+    for nome, telefone, vencimento in clientes:
+        dt_venc = datetime.strptime(vencimento, "%Y-%m-%d").date()
+        if dt_venc == datas_aviso["3 dias"]:
+            resultados["3 dias"].append((nome, telefone, vencimento))
+        elif dt_venc == datas_aviso["1 dia"]:
+            resultados["1 dia"].append((nome, telefone, vencimento))
+        elif dt_venc == datas_aviso["vencimento hoje"]:
+            resultados["vencimento hoje"].append((nome, telefone, vencimento))
+        elif dt_venc == datas_aviso["1 dia após"]:
+            resultados["1 dia após"].append((nome, telefone, vencimento))
 
-    if not tem_alerta:
-        msg = "✅ Nenhum cliente para alertar hoje."
+    mensagens = []
+    if resultados["3 dias"]:
+        mensagens.append("⏳ Planos vencendo em 3 dias:")
+        for nome, telefone, venc in resultados["3 dias"]:
+            mensagens.append(f"  - {nome} (Tel: {telefone}) vence em {venc}")
+    if resultados["1 dia"]:
+        mensagens.append("⏳ Planos vencendo em 1 dia:")
+        for nome, telefone, venc in resultados["1 dia"]:
+            mensagens.append(f"  - {nome} (Tel: {telefone}) vence em {venc}")
+    if resultados["vencimento hoje"]:
+        mensagens.append("⚠️ Planos vencendo hoje:")
+        for nome, telefone, venc in resultados["vencimento hoje"]:
+            mensagens.append(f"  - {nome} (Tel: {telefone}) vence hoje!")
+    if resultados["1 dia após"]:
+        mensagens.append("❌ Planos vencidos ontem:")
+        for nome, telefone, venc in resultados["1 dia após"]:
+            mensagens.append(f"  - {nome} (Tel: {telefone}) venceu ontem!")
 
-    await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=msg, parse_mode="Markdown")
+    if mensagens:
+        texto = "\n".join(mensagens)
+        try:
+            await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=texto)
+        except Exception as e:
+            print(f"Erro ao enviar mensagem ao admin: {e}")
 
 def main():
     criar_tabela()
@@ -330,36 +359,37 @@ def main():
     application = ApplicationBuilder().token(TOKEN).build()
 
     conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^(➕ Adicionar Cliente)$"), add_cliente)],
+        entry_points=[CommandHandler("addcliente", add_cliente)],
         states={
             ADD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_name)],
             ADD_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_phone)],
-            ADD_PACOTE: [MessageHandler(filters.Regex("^📦"), add_pacote)],
-            ADD_PLANO: [MessageHandler(filters.Regex("^💰"), add_plano)],
+            ADD_PACOTE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_pacote)],
+            ADD_PLANO: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_plano)],
         },
-        fallbacks=[CommandHandler("cancelar", cancelar)]
+        fallbacks=[CommandHandler("cancelar", cancelar)],
     )
 
-    conv_mensagem_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^📨"), enviar_mensagem)],
+    enviar_msg_handler = ConversationHandler(
+        entry_points=[CommandHandler("enviarmensagem", enviar_mensagem)],
         states={
             ESCOLHER_MENSAGEM: [MessageHandler(filters.TEXT & ~filters.COMMAND, escolher_mensagem)]
         },
-        fallbacks=[CommandHandler("cancelar", cancelar)]
+        fallbacks=[CommandHandler("cancelar", cancelar)],
     )
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(conv_handler)
-    application.add_handler(conv_mensagem_handler)
-    application.add_handler(MessageHandler(filters.Regex("^(📋 Listar Clientes)$"), list_clientes))
-    application.add_handler(MessageHandler(filters.Regex("^(🔄 Renovar Plano)$"), renovar_cliente))
+    application.add_handler(enviar_msg_handler)
+    application.add_handler(CommandHandler("listclientes", list_clientes))
+    application.add_handler(CommandHandler("renovar", renovar_cliente))
     application.add_handler(CallbackQueryHandler(callback_opcoes))
-    application.add_handler(MessageHandler(filters.Regex("^(📤 Exportar Dados)$"), exportar))
-    application.add_handler(MessageHandler(filters.Regex("^(📊 Relatório)$"), relatorio))
-    application.add_handler(MessageHandler(filters.Regex("^(❌ Cancelar Operação)$"), cancelar))
+    application.add_handler(CommandHandler("exportar", exportar))
+    application.add_handler(CommandHandler("relatorio", relatorio))
+    application.add_handler(CommandHandler("cancelar", cancelar))
 
-    # Agenda o job diário para lembrar o admin às 9h
-    application.job_queue.run_daily(lembrar_admin_vencimentos, time=datetime.strptime("09:00", "%H:%M").time())
+    # Job para lembrar admin dos vencimentos
+    job_queue = application.job_queue
+    job_queue.run_daily(lembrar_admin_vencimentos, time=datetime.now().time())
 
     application.run_polling()
 

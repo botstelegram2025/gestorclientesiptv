@@ -1837,3 +1837,8 @@ Configure sua empresa para personalizar as mensagens do bot."""
         logger.error(f"Erro nas configurações: {e}")
         await update.message.reply_text("❌ Erro ao carregar configurações!",
                                         reply_markup=criar_teclado_principal())
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
+

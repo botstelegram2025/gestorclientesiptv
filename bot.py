@@ -1,179 +1,176 @@
 import os
-import sqlite3
 from datetime import datetime, timedelta
-import pytz
 import logging
-import aiohttp
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, CallbackQueryHandler,
-    ContextTypes
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup
 )
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+)
+from dotenv import load_dotenv
+from database import DatabaseManager  # Implemente essa classe em outro arquivo
 
-# === CONFIG ===
+load_dotenv()
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-EVOLUTION_API_URL = os.getenv("EVOLUTION_API_URL")
-EVOLUTION_API_TOKEN = os.getenv("EVOLUTION_API_TOKEN")
-ALLOWED_USERS = set(map(int, os.getenv("ALLOWED_USERS", "123456789").split(",")))
-TZ = pytz.timezone("America/Sao_Paulo")
+ALLOWED_USERS = set(map(int, os.getenv("ALLOWED_USERS", "").split(",")))
 
 logging.basicConfig(level=logging.INFO)
 
-# === DB ===
-class DB:
-    def __init__(self):
-        self.conn = sqlite3.connect("clientes.db", check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
-        self._criar()
-
-    def _criar(self):
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS clientes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                nome TEXT, telefone TEXT, pacote TEXT,
-                valor REAL, vencimento TEXT
-            )
-        """)
-        self.conn.commit()
-
-    def listar(self):
-        return self.conn.execute("SELECT * FROM clientes").fetchall()
-
-    def buscar(self, id):
-        return self.conn.execute("SELECT * FROM clientes WHERE id = ?", (id,)).fetchone()
-
-    def atualizar(self, id, campo, valor):
-        self.conn.execute(f"UPDATE clientes SET {campo} = ? WHERE id = ?", (valor, id))
-        self.conn.commit()
-
-    def excluir(self, id):
-        self.conn.execute("DELETE FROM clientes WHERE id = ?", (id,))
-        self.conn.commit()
-
-db = DB()
-
-# === WHATSAPP ===
-async def enviar_whatsapp(numero, mensagem):
+# ================== WHATSAPP ==================
+import aiohttp
+async def enviar_whatsapp(telefone, mensagem):
+    url = os.getenv("EVOLUTION_API_URL")
+    token = os.getenv("EVOLUTION_API_TOKEN")
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
     async with aiohttp.ClientSession() as session:
-        async with session.post(EVOLUTION_API_URL, headers={
-            "Authorization": f"Bearer {EVOLUTION_API_TOKEN}",
-            "Content-Type": "application/json"
-        }, json={"number": numero, "message": mensagem}) as resp:
+        async with session.post(url, headers=headers, json={"number": telefone, "message": mensagem}) as resp:
             return resp.status == 200
 
-# === COMANDO /start ===
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ================== LISTAR CLIENTES ==================
+async def listar_clientes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ALLOWED_USERS:
         await update.message.reply_text("❌ Acesso negado.")
         return
-    await update.message.reply_text("👋 Bem-vindo!\nUse /listar para ver os clientes.")
 
-# === /listar CLIENTES ===
-async def listar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    clientes = db.listar()
+    db = DatabaseManager()
+    clientes = db.listar_clientes()
+
     if not clientes:
-        await update.message.reply_text("📭 Nenhum cliente encontrado.")
+        await update.message.reply_text("📋 Nenhum cliente cadastrado ainda.")
         return
 
-    hoje = datetime.now(TZ)
     clientes_ordenados = []
-
     for c in clientes:
-        venc = datetime.strptime(c["vencimento"], "%Y-%m-%d")
-        dias = (venc - hoje).days
-        clientes_ordenados.append((c, dias))
+        try:
+            c['vencimento_obj'] = datetime.strptime(c['vencimento'], '%Y-%m-%d')
+            c['dias_restantes'] = (c['vencimento_obj'] - datetime.now()).days
+            clientes_ordenados.append(c)
+        except Exception:
+            continue
 
-    clientes_ordenados.sort(key=lambda x: x[0]["vencimento"])
+    clientes_ordenados.sort(key=lambda x: x['vencimento_obj'])
 
     keyboard = []
-    for cliente, dias in clientes_ordenados:
+    for cliente in clientes_ordenados:
+        nome = cliente['nome']
+        venc = cliente['vencimento_obj'].strftime('%d/%m')
         status = "🟢"
-        if dias < 0: status = "🔴"
-        elif dias == 0: status = "⚠️"
-        elif dias <= 3: status = "🟡"
+        if cliente['dias_restantes'] < 0:
+            status = "🔴"
+        elif cliente['dias_restantes'] == 0:
+            status = "⚠️"
+        elif cliente['dias_restantes'] <= 3:
+            status = "🟡"
 
-        label = f"{status} {cliente['nome']} - {cliente['vencimento']}"
-        keyboard.append([
-            InlineKeyboardButton(label, callback_data=f"cliente_{cliente['id']}")
-        ])
+        btn = InlineKeyboardButton(
+            f"{status} {nome} - R$ {cliente['valor']:.0f} - {venc}",
+            callback_data=f"cliente_{cliente['id']}"
+        )
+        keyboard.append([btn])
 
     await update.message.reply_text(
-        "📋 *Clientes por vencimento:*",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
+        "👥 *Clientes (ordenados por vencimento)*",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-# === CALLBACK INTERAÇÃO ===
-async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ================== CALLBACK INLINE ==================
+async def callback_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
+    db = DatabaseManager()
 
     if data.startswith("cliente_"):
-        id = int(data.split("_")[1])
-        c = db.buscar(id)
-        venc_br = datetime.strptime(c["vencimento"], "%Y-%m-%d").strftime("%d/%m/%Y")
+        cliente_id = int(data.split("_")[1])
+        cliente = db.buscar_cliente_por_id(cliente_id)
+        if not cliente:
+            await query.edit_message_text("❌ Cliente não encontrado.")
+            return
 
-        texto = (
-            f"👤 *{c['nome']}*\n"
-            f"📱 {c['telefone']}\n"
-            f"📦 {c['pacote']}\n"
-            f"💰 R$ {c['valor']:.2f}\n"
-            f"📅 Venc: {venc_br}"
+        vencimento_br = datetime.strptime(cliente['vencimento'], "%Y-%m-%d").strftime("%d/%m/%Y")
+        msg = (
+            f"👤 *{cliente['nome']}*\n"
+            f"📱 {cliente['telefone']}\n"
+            f"📦 {cliente['pacote']}\n"
+            f"💰 R$ {cliente['valor']:.2f}\n"
+            f"📅 Vencimento: {vencimento_br}"
         )
 
-        botoes = [
-            [InlineKeyboardButton("📧 Enviar lembrete", callback_data=f"lembrete_{id}")],
-            [InlineKeyboardButton("🔄 Renovar", callback_data=f"renovar_{id}")],
-            [InlineKeyboardButton("📦 Alterar pacote", callback_data=f"alterar_pacote_{id}")],
-            [InlineKeyboardButton("📅 Alterar vencimento", callback_data=f"alterar_venc_{id}")],
-            [InlineKeyboardButton("✏️ Editar", callback_data=f"editar_{id}")],
-            [InlineKeyboardButton("🗑️ Excluir", callback_data=f"confirmar_excluir_{id}")],
-            [InlineKeyboardButton("⬅️ Voltar", callback_data="voltar")]
+        keyboard = [
+            [
+                InlineKeyboardButton("📧 Enviar lembrete", callback_data=f"lembrete_{cliente_id}"),
+                InlineKeyboardButton("🔄 Renovar", callback_data=f"renovar_{cliente_id}")
+            ],
+            [
+                InlineKeyboardButton("📦 Alterar pacote", callback_data=f"alterar_pacote_{cliente_id}"),
+                InlineKeyboardButton("📅 Alterar vencimento", callback_data=f"alterar_venc_{cliente_id}")
+            ],
+            [
+                InlineKeyboardButton("✏️ Editar", callback_data=f"editar_{cliente_id}"),
+                InlineKeyboardButton("🗑️ Excluir", callback_data=f"confirmar_excluir_{cliente_id}")
+            ],
+            [
+                InlineKeyboardButton("⬅️ Voltar", callback_data="voltar_lista")
+            ]
         ]
-        await query.edit_message_text(text=texto, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(botoes))
+        await query.edit_message_text(
+            text=msg, parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
     elif data.startswith("lembrete_"):
-        id = int(data.split("_")[1])
-        c = db.buscar(id)
-        venc_br = datetime.strptime(c["vencimento"], "%Y-%m-%d").strftime("%d/%m/%Y")
-        msg = f"🔔 Olá {c['nome']}, lembramos que seu plano '{c['pacote']}' vence em {venc_br}. Valor: R$ {c['valor']:.2f}"
-        sucesso = await enviar_whatsapp(c["telefone"], msg)
-        await query.edit_message_text("✅ Lembrete enviado." if sucesso else "❌ Falha ao enviar.")
+        cliente_id = int(data.split("_")[1])
+        cliente = db.buscar_cliente_por_id(cliente_id)
+        vencimento = datetime.strptime(cliente['vencimento'], "%Y-%m-%d").strftime('%d/%m/%Y')
+        mensagem = f"🔔 Olá {cliente['nome']}, lembramos que seu plano '{cliente['pacote']}' vence em {vencimento}. Valor: R$ {cliente['valor']:.2f}"
+        sucesso = await enviar_whatsapp(cliente['telefone'], mensagem)
+        texto = "✅ Mensagem enviada!" if sucesso else "❌ Falha ao enviar mensagem."
+        await query.edit_message_text(texto)
 
     elif data.startswith("renovar_"):
-        id = int(data.split("_")[1])
-        c = db.buscar(id)
+        cliente_id = int(data.split("_")[1])
+        cliente = db.buscar_cliente_por_id(cliente_id)
         dias = {
-            "1 mês": 30, "3 meses": 90, "6 meses": 180, "12 meses": 365
-        }.get(c["pacote"], 30)
-        nova = datetime.strptime(c["vencimento"], "%Y-%m-%d") + timedelta(days=dias)
-        db.atualizar(id, "vencimento", nova.strftime("%Y-%m-%d"))
-        await query.edit_message_text(f"✅ Renovado até {nova.strftime('%d/%m/%Y')}")
+            "1 mês": 30,
+            "3 meses": 90,
+            "6 meses": 180,
+            "12 meses": 365
+        }.get(cliente["pacote"], 30)
+        vencimento = datetime.strptime(cliente['vencimento'], "%Y-%m-%d")
+        novo_venc = vencimento + timedelta(days=dias)
+        db.atualizar_cliente(cliente_id, "vencimento", novo_venc.strftime('%Y-%m-%d'))
+        await query.edit_message_text(f"✅ Renovado até {novo_venc.strftime('%d/%m/%Y')}!")
 
     elif data.startswith("confirmar_excluir_"):
-        id = int(data.split("_")[2])
+        cliente_id = int(data.split("_")[2])
         keyboard = [
-            [InlineKeyboardButton("✅ Sim", callback_data=f"excluir_{id}"),
-             InlineKeyboardButton("❌ Não", callback_data="voltar")]
+            [
+                InlineKeyboardButton("✅ Confirmar", callback_data=f"excluir_{cliente_id}"),
+                InlineKeyboardButton("❌ Cancelar", callback_data="voltar_lista")
+            ]
         ]
-        await query.edit_message_text("⚠️ Confirmar exclusão?", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text("⚠️ Tem certeza que deseja excluir o cliente?", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif data.startswith("excluir_"):
-        id = int(data.split("_")[1])
-        db.excluir(id)
-        await query.edit_message_text("🗑️ Cliente excluído com sucesso.")
+        cliente_id = int(data.split("_")[1])
+        sucesso = db.excluir_cliente(cliente_id)
+        texto = "✅ Cliente excluído." if sucesso else "❌ Erro ao excluir."
+        await query.edit_message_text(texto)
 
-    elif data == "voltar":
-        await listar(update, context)
+    elif data == "voltar_lista":
+        await listar_clientes(update, context)
 
-# === MAIN ===
+# ================== MAIN ==================
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("listar", listar))
-    app.add_handler(CallbackQueryHandler(callback))
+    app.add_handler(CommandHandler("start", listar_clientes))
+    app.add_handler(CommandHandler("listar", listar_clientes))
+    app.add_handler(CallbackQueryHandler(callback_inline))
 
     app.run_polling()
 

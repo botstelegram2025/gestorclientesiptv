@@ -2,6 +2,8 @@ python-telegram-bot==20.3
 aiohttp
 pytz
 nest_asyncio
+python-dotenv
+
 
 
 

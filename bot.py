@@ -17,7 +17,7 @@ load_dotenv()
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 EVOLUTION_API_URL = os.getenv("EVOLUTION_API_URL")
 EVOLUTION_API_TOKEN = os.getenv("EVOLUTION_API_TOKEN")
-ALLOWED_USERS = set(map(int, os.getenv("ALLOWED_USERS", "").split(",")))
+ALLOWED_USERS = set(map(int, filter(None, os.getenv("ALLOWED_USERS", "").split(","))))
 TZ = pytz.timezone("America/Sao_Paulo")
 
 logging.basicConfig(level=logging.INFO)
@@ -53,7 +53,7 @@ class DB:
 db = DB()
 
 # ========== CONSTANTES ==========
-NOME, TELEFONE, PACOTE, VALOR, VENCIMENTO = range(5)
+NOME, TELEFONE, PACOTE, VALOR, VALOR_CUSTOM, VENCIMENTO = range(6)
 
 TECLADO = ReplyKeyboardMarkup([
     ["📋 Listar clientes", "➕ Adicionar cliente"],
@@ -63,13 +63,26 @@ TECLADO = ReplyKeyboardMarkup([
 
 CANCELAR = ReplyKeyboardMarkup([["❌ Cancelar"]], resize_keyboard=True, one_time_keyboard=True)
 
+PACOTES = ReplyKeyboardMarkup([
+    ["📦 1 mês", "📦 3 meses"],
+    ["📦 6 meses", "📦 12 meses"],
+    ["❌ Cancelar"]
+], resize_keyboard=True, one_time_keyboard=True)
+
+VALORES = ReplyKeyboardMarkup([
+    ["💰 30", "💰 35", "💰 40"],
+    ["💰 45", "💰 50", "💰 60"],
+    ["💰 70", "💰 90", "💰 135"],
+    ["💸 Valor personalizado", "❌ Cancelar"]
+], resize_keyboard=True, one_time_keyboard=True)
+
+# ========== UTILS ==========
 def agora():
     return datetime.now(TZ)
 
 def is_admin(user_id):
     return user_id in ALLOWED_USERS
 
-# ========== WHATSAPP ==========
 async def enviar_whatsapp(numero, mensagem):
     async with aiohttp.ClientSession() as session:
         async with session.post(EVOLUTION_API_URL, headers={
@@ -132,17 +145,27 @@ async def get_nome(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def get_telefone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["telefone"] = update.message.text
-    await update.message.reply_text("📦 Pacote:")
+    await update.message.reply_text("📦 Escolha o pacote:", reply_markup=PACOTES)
     return PACOTE
 
 async def get_pacote(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["pacote"] = update.message.text
-    await update.message.reply_text("💰 Valor:")
+    pacote = update.message.text.replace("📦", "").strip()
+    context.user_data["pacote"] = pacote
+    await update.message.reply_text("💰 Escolha o valor:", reply_markup=VALORES)
     return VALOR
 
 async def get_valor(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    valor = update.message.text.replace("💰", "").strip()
+    if valor == "Valor personalizado" or "personalizado" in valor.lower():
+        await update.message.reply_text("💸 Digite o valor personalizado:")
+        return VALOR_CUSTOM
+    context.user_data["valor"] = float(valor)
+    await update.message.reply_text("📅 Data de vencimento (AAAA-MM-DD):")
+    return VENCIMENTO
+
+async def get_valor_custom(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["valor"] = float(update.message.text.replace(",", "."))
-    await update.message.reply_text("📅 Vencimento (AAAA-MM-DD):")
+    await update.message.reply_text("📅 Data de vencimento (AAAA-MM-DD):")
     return VENCIMENTO
 
 async def get_vencimento(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -155,7 +178,7 @@ async def get_vencimento(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def agendar(context: ContextTypes.DEFAULT_TYPE):
     if agora().strftime("%H:%M") == "09:00":
         for c in db.listar():
-            msg = f"📅 Bom dia, {c[1]}!\nSeu plano '{c[3]}' vence em {c[5]}.\n💰 Valor: R$ {c[4]:.2f}"
+            msg = f"📅 Bom dia, {c[1]}!\nSeu plano '{c[3]}' vence em {c[5]}.\n💰 R$ {c[4]:.2f}"
             await enviar_whatsapp(c[2], msg)
         print("✅ Envio automático realizado às 09:00")
 
@@ -170,6 +193,7 @@ def main():
             TELEFONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_telefone)],
             PACOTE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_pacote)],
             VALOR: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_valor)],
+            VALOR_CUSTOM: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_valor_custom)],
             VENCIMENTO: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_vencimento)],
         },
         fallbacks=[MessageHandler(filters.Regex("^❌ Cancelar$"), cancelar)],
